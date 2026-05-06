@@ -1,0 +1,21 @@
+{
+  "name": "kronos-scanner",
+  "version": "1.0.0",
+  "description": "Polymarket scanner bot — fetches candles, calls Kronos sidecar, writes edges to SQLite",
+  "type": "module",
+  "scripts": {
+    "bot": "tsx bot.ts",
+    "backfill": "tsx backfill.ts",
+    "init-db": "tsx init-db.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

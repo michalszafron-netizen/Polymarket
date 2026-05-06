@@ -1,0 +1,30 @@
+# Database
+kronos.db
+kronos.db-journal
+kronos.db-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+sidecar/.venv/
+
+# Node.js
+node_modules/
+scanner/node_modules/
+dashboard/node_modules/
+dashboard/.next/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Env
+.env
+.env.local
