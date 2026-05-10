@@ -1,6 +1,6 @@
 # KRONOS TERMINAL — Dokumentacja Systemu
 
-> Wersja: 1.0 | Data: 2026-05-06 | Status: Live (Research Mode)
+> Wersja: 2.0 | Data: 2026-05-10 | Status: Live (Research Mode)
 
 ---
 
@@ -15,22 +15,23 @@ KRONOS to system badawczy do wykrywania i analizowania statystycznych przewag (e
 ## 2. Architektura systemu
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        KRONOS TERMINAL                          │
-├──────────────┬──────────────────────┬───────────────────────────┤
-│   SCANNER    │       SIDECAR        │        DASHBOARD          │
-│  (Node.js)   │      (Python)        │       (Next.js)           │
-│              │                      │                           │
-│ Co 5 minut:  │  POST /predict       │  localhost:3000           │
-│ 1. Bybit API │  ──────────────────► │  - PNL Chart (5 rynków)   │
-│ 2. Chronos   │  Amazon Chronos T5   │  - Signal Radar           │
-│ 3. Poly CLOB │  200M parametrów     │  - Trade Ledger           │
-│ 4. SQLite    │  CPU inference       │  - System Status          │
-│              │  ~1.3s/predykcja     │  - Prediction Console     │
-└──────────────┴──────────────────────┴───────────────────────────┘
-                              │
-                        kronos.db
-                       (SQLite WAL)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           KRONOS TERMINAL                                   │
+├──────────────┬──────────────────────┬───────────────────────┬───────────────┤
+│   SCANNER    │       SIDECAR        │      DASHBOARD        │  LAG MONITOR  │
+│  (Node.js)   │      (Python)        │      (Next.js)        │  (Node.js)    │
+│              │                      │                       │               │
+│ Co 5 minut:  │  POST /predict       │  localhost:3000       │  Co 5 sekund: │
+│ 1. Bybit API │  ──────────────────► │  - PNL Chart          │  1. Binance WS│
+│ 2. Chronos   │  Amazon Chronos T5   │  - Signal Radar       │  2. Poly CLOB │
+│ 3. Poly CLOB │  200M parametrów     │  - Trade Ledger       │  3. Fair model│
+│ 4. SQLite    │  CPU inference       │  - System Status      │  4. Lag log   │
+│              │  ~1.3s/predykcja     │  - Prediction Console │  5. Sygnał DC │
+│              │                      │  - Lag Monitor viz    │               │
+└──────────────┴──────────────────────┴───────────────────────┴───────────────┘
+                               │
+                         kronos.db
+                        (SQLite WAL)
 ```
 
 ### Komponenty
@@ -38,8 +39,10 @@ KRONOS to system badawczy do wykrywania i analizowania statystycznych przewag (e
 | Komponent | Technologia | Port | Rola |
 |---|---|---|---|
 | Scanner Bot | TypeScript + Node.js | — | Orkiestracja, zapis danych |
-| Sidecar | Python + FastAPI | 8000 | Inference AI |
+| Sidecar | Python + FastAPI | 8000 | Inference AI (Chronos) |
 | Dashboard | Next.js 15 + React | 3000 | Wizualizacja |
+| Lag Monitor | TypeScript + Node.js | — | Spot ↔ Poly lag detection |
+| Binance WS | WebSocket | — | Feed cen BTC/ETH 1s |
 | Baza danych | SQLite (WAL mode) | — | Persystencja |
 
 ---
@@ -66,10 +69,11 @@ KRONOS to system badawczy do wykrywania i analizowania statystycznych przewag (e
    c) Wyślij świece do Sidecar → Chronos generuje 100 ścieżek przyszłości
    d) Pobierz cenę YES z Polymarket CLOB (bez auth, publiczne API)
    e) Oblicz EV i Kelly dla właściwego tokenu (YES jeśli UP, NO jeśli DOWN)
-   f) Zapisz edge do SQLite
+   f) **Double Confirmation**: sprawdź czy Lag Monitor daje ten sam sygnał
+   g) Zapisz edge do SQLite (RAW confidence, nie skalibrowany)
 
 4. LOG do konsoli:
-   ✅ 🤖 BTC 5M → DOWN 93% | EV 59% | K 83% | 1308ms [POLY:0.415 [+8s]]
+   ✅ 🤖 BTC 5M → DOWN 93%→52% cal | EV 59% | K 83% | 1308ms [POLY:0.415 [+8s]] 🟢DC
 ```
 
 ### Formuły matematyczne
@@ -86,9 +90,72 @@ correct = 1  gdy direction=UP  i resolve_price > anchor_price
 correct = 1  gdy direction=DOWN i resolve_price < anchor_price
 ```
 
+### Platt Scaling (rekalibracja confidence)
+
+Chronos jest overconfident — mówi 95% a trafia ~50%. Platt scaling mapuje raw confidence na skalibrowane p-stwo:
+
+```
+calibrated = sigmoid(A × rawConfidence + B)
+
+BTC 5M:  A =  1.0997, B = -1.1046
+ETH 5M:  A = -3.1659, B =  2.8221
+BTC 15M: A = -2.4435, B =  2.2109
+ETH 15M: A = -0.0433, B = -0.1152
+```
+
+Brier Score przed: ~0.44 → po: ~0.25 ✅ (dobrze skalibrowany)
+
 ---
 
-## 4. Model AI — Amazon Chronos T5-base
+## 4. Lag Monitor — Spot ↔ Polymarket Lag Detection
+
+### Co to jest
+
+Lag Monitor to podsystem działający równolegle do głównego skanera. Co 5 sekund:
+1. Pobiera snapshot ceny spot z Binance WebSocket (BTCUSDT, ETHUSDT)
+2. Pobiera midpoint Polymarket CLOB dla aktualnego okna
+3. Liczy "fair YES price" wg modelu wrażliwości na zmianę spot
+4. Loguje lukę (lag_pct) do tabeli `lag_log`
+5. Emituje sygnał `BUY_YES` / `BUY_NO` gdy luka > threshold
+
+### Model fair price
+
+```
+fair_yes = clamp(α + spot_change_pct × sensitivity, 0.02, 0.98)
+lag_pct  = (fair_yes - poly_yes) × 100  (w punktach procentowych)
+```
+
+### Kalibracja v2 (2026-05-10)
+
+Wykonana na ~20k próbkach z filtrem okna (pierwsza połowa). Regresja liniowa `poly_yes ~ spot_change_pct`:
+
+| Rynek | N | α (intercept) | Sensitivity (pp/1%) | R² | Threshold (95p) |
+|---|---|---|---|---|---|
+| BTC 5M | 4998 | 0.496 | 598 | 0.675 | 21.74pp |
+| ETH 5M | 4730 | 0.497 | 553 | 0.756 | 19.17pp |
+| BTC 15M | 5504 | 0.505 | 331 | 0.793 | 14.23pp |
+| ETH 15M | 5431 | 0.503 | 286 | 0.796 | 14.37pp |
+| **Globalny threshold** | | | | | **17.4pp** |
+
+### Edge detection
+
+```
+|lag_pct| > 17.4pp  → sygnał (BUY_YES gdy poly za nisko, BUY_NO gdy poly za wysoko)
++ filtr okna: 5M < 150s, 15M < 270s (tylko pierwsza połowa)
+```
+
+### Double Confirmation
+
+Lag Monitor udostępnia funkcję `getLatestLagSignal(market)` która zwraca ostatni sygnał (ważny przez 30s). Bot używa jej do strategii **Double Confirmation**:
+
+- Chronos UP + Lag BUY_YES → 🟢DC (zgodne)
+- Chronos DOWN + Lag BUY_NO → 🟢DC (zgodne)
+- Sprzeczne → 🔴DC
+- Brak sygnału lag → ⏳
+
+---
+
+## 5. Model AI — Amazon Chronos T5-base
 
 ### Czym jest
 
@@ -118,7 +185,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 5. Integracja Polymarket
+## 6. Integracja Polymarket
 
 ### Co pobieramy
 
@@ -150,32 +217,58 @@ yes_price BETWEEN 0.10 AND 0.90
 
 ---
 
-## 6. Wyniki po ~6 godzinach działania (live, POLY ceny)
+## 7. Wyniki po 48h danych (2026-04-26 → 2026-05-10)
 
-> Dane zebrane: 2026-05-06, $1/trade flat bet, $100 budżet
+### Stan bazy
 
-| Rynek | Trades | Win% | PNL | ROI | Max DD | Avg Pay |
-|---|---|---|---|---|---|---|
-| BTC 5-Min | ~40 | 47.5% | +$1.06 | +1.1% | 6.4% | 2.29x |
-| ETH 5-Min | ~42 | **57.1%** | **+$9.82** | **+9.8%** | 3.6% | 2.44x |
-| BTC 15-Min | ~27 | 51.9% | +$0.21 | +0.2% | 5.1% | 2.41x |
-| ETH 15-Min | ~28 | 50.0% | +$7.75 | +7.7% | 4.5% | 2.55x |
-| **ŁĄCZNIE** | **137** | **51.8%** | **+$18.84** | **+18.8%** | 7.6% | — |
+| Tabela | Liczba rekordów |
+|---|---|
+| edges | 5752 total, 5744 resolved |
+| lag_log | 132736 próbek |
+| Poprawne edges | 2864 (49.9%) |
 
-**Próbka zbyt mała** — minimum wiarygodne to 200 trades/rynek. Wyniki z jednego dnia to szum statystyczny, nie dowód edge.
+### Chronos AI — surowa trafność
+
+Chronos samodzielnie ma **49.9% WR** = random. To potwierdza, że zero-shot Chronos na danych krypto nie ma przewagi nad rzutem monetą.
+
+### Double Confirmation — przełom
+
+Korelacja sygnałów Chronos vs Lag Monitor (19-16-553 trades):
+
+| Sytuacja | Trades | Win Rate |
+|---|---|---|
+| **Zgodne** (Chronos + Lag) | **19** | **68.4%** ✅ |
+| Sprzeczne | 16 | 25.0% |
+| Brak sygnału lag | 553 | 48.1% |
+
+**Wniosek**: Gdy Chronos i Lag Monitor są zgodne → 68.4% WR. Rekomendacja: wchodź TYLKO gdy oba sygnały zgodne.
+
+### Platt Scaling — kalibracja confidence
+
+| Rynek | N | Brier przed | Brier po | Poprawa |
+|---|---|---|---|---|
+| BTC 5M | 199 | 0.4485 | 0.2493 | ✅ +0.1992 |
+| ETH 5M | 211 | 0.4452 | 0.2470 | ✅ +0.1982 |
+| BTC 15M | 87 | 0.4175 | 0.2471 | ✅ +0.1704 |
+| ETH 15M | 91 | 0.4439 | 0.2485 | ✅ +0.1954 |
+
+Brier Score ~0.25 = dobrze skalibrowany (0.25 = idealna kalibracja).
 
 ---
 
-## 7. Wady systemu
+## 8. Wady systemu
 
 ### Krytyczne
 - **Brak egzekucji** — system nie składa zleceń, wszystko manualne
 - **Brak zarządzania ryzykiem** — Kelly criterion wymaga kalibracji
 - **Chronos nie był fine-tunowany** na krypto ani Polymarket — zero-shot
+- **Chronos ma 49.9% WR = random** bez Double Confirmation
 - **CPU inference** — 1.3s/predykcja, przy GPU byłoby 50ms
 
 ### Istotne
-- **Brak Chainlink oracle** — rozwiązujemy edgespo cenie Bybit, Polymarket używa Chainlink (drobne rozbieżności)
+- **Double Confirmation bazuje na małej próbce** — tylko 19 zgodnych trades
+- **Lag Monitor wymaga ciągłego Binance WS** — ryzyko rozłączenia
+- **Brak Chainlink oracle** — rozwiązujemy edges po cenie Bybit, Polymarket używa Chainlink (drobne rozbieżności)
 - **Brak spread/slippage** — backtest zakłada idealne wejście po mid-price
 - **Brak position limits** — Kelly może sugerować duże pozycje na małej próbce
 - **Model bias** — Chronos ma 54% YES / 46% NO bias (widoczny w Model Bias)
@@ -187,19 +280,22 @@ yes_price BETWEEN 0.10 AND 0.90
 
 ---
 
-## 8. Zalety systemu
+## 9. Zalety systemu
 
 - **Lokalne AI** — zero kosztów inference, Chronos działa na własnym CPU/GPU
 - **Prawdziwe ceny Polymarket** — CLOB midpoint zamiast symulowanych 0.51
 - **Synchronizacja czasowa** — scanner startuje 2s przed otwarciem okna
 - **Filtr okna** — odrzuca sygnały z połowy/końca okna (zatruty pricing)
+- **Double Confirmation** — 68.4% WR gdy Chronos + Lag zgodne
+- **Lag Monitor z kalibracją v2** — R² > 0.68, threshold 17.4pp
+- **Platt scaling** — Brier Score 0.25 (dobrze skalibrowany)
 - **Persystentna baza** — SQLite WAL, dane nie giną przy restarcie
 - **Pełny pipeline backtestowy** — simulate_all.py, simple.py, kelly.py, diagnose.py
-- **Dashboard live** — PNL chart trade-po-tradzie, system status, POLY LIVE badge
+- **Dashboard live** — PNL chart, Lag Monitor viz, system status, POLY LIVE badge
 
 ---
 
-## 9. Jak uruchomić
+## 10. Jak uruchomić
 
 ```powershell
 # Uruchom wszystko jednym plikiem:
@@ -211,7 +307,7 @@ start.bat
 cd C:\Users\markowyy\Documents\Polymarket\sidecar
 python -m uvicorn main:app --host 0.0.0.0 --port 8000
 
-# Okno 2 — Scanner
+# Okno 2 — Scanner (bot + lag monitor + binance ws)
 cd C:\Users\markowyy\Documents\Polymarket\scanner
 npx tsx bot.ts
 
@@ -225,7 +321,7 @@ $env:INFERENCE_MODE = "gbm"
 
 ---
 
-## 10. Narzędzia analityczne
+## 11. Narzędzia analityczne
 
 ```powershell
 # Pełny raport wszystkich rynków (tylko POLY live)
@@ -242,11 +338,23 @@ python research/calibration.py
 
 # Diagnostyka cen (sprawdź czy yes_price są sensowne)
 python backtest/diagnose.py
+
+# Kalibracja Lag Monitora (znajdź sensitivity i threshold)
+python research/calibrate_lag.py
+
+# Platt Scaling (rekalibracja Chronos confidence)
+python research/recalibrate_confidence.py
+
+# Korelacja sygnałów Chronos vs Lag Monitor
+python research/correlate_signals.py
+
+# Podgląd bazy danych
+python research/db_status.py
 ```
 
 ---
 
-## 11. Możliwości testowania
+## 12. Możliwości testowania
 
 ### Testy statystyczne (po zebraniu danych)
 
@@ -264,10 +372,11 @@ Po 1 tyg: ~2000 POLY trades → można wyciągać wnioski
 4. **Porównanie rano vs wieczór** — czy w różnych godzinach edge się zmienia?
 5. **BTC vs ETH** — który token jest lepiej przewidywalny?
 6. **5-Min vs 15-Min** — który horyzont lepiej trafia?
+7. **Double Confirmation** — czy 68.4% WR utrzymuje się na większej próbce?
 
 ---
 
-## 12. Możliwości ulepszenia
+## 13. Możliwości ulepszenia
 
 ### Krótkoterminowe (bez dużych zmian)
 
@@ -277,6 +386,8 @@ Po 1 tyg: ~2000 POLY trades → można wyciągać wnioski
 | Dodać filtr confidence gate w scannerze (zapisuj tylko >60%) | ⭐ | Czystsze dane |
 | Fine-tuning Chronosa na historycznych danych BTC/ETH | ⭐⭐⭐ | +5-10% accuracy |
 | Dodać więcej rynków (SOL, MATIC) | ⭐ | Więcej okazji |
+| Automatyczna rekalibracja Platt scaling co N dni | ⭐ | Utrzymanie kalibracji |
+| Dynamiczny threshold lag monitora (zamiast stałego 17.4pp) | ⭐⭐ | Lepsze sygnały |
 
 ### Średnioterminowe
 
@@ -287,6 +398,7 @@ Po 1 tyg: ~2000 POLY trades → można wyciągać wnioski
 | Dodanie on-chain data (funding rate, open interest) | ⭐⭐ | Lepszy kontekst |
 | Ensemble: Chronos + XGBoost + klasyczna statystyka | ⭐⭐⭐ | Stabilniejszy edge |
 | Kelly sizing zamiast flat bet | ⭐⭐ | Wyższy zwrot |
+| Więcej par (SOL, MATIC) do lag monitora | ⭐ | Więcej okazji |
 
 ### Długoterminowe
 
@@ -299,14 +411,16 @@ Po 1 tyg: ~2000 POLY trades → można wyciągać wnioski
 
 ---
 
-## 13. Struktura plików
+## 14. Struktura plików
 
 ```
 C:\Users\markowyy\Documents\Polymarket\
 ├── scanner/
-│   ├── bot.ts              # Główna pętla skanowania
-│   ├── backfill.ts         # Wypełnianie danymi historycznymi
+│   ├── bot.ts              # Główna pętla skanowania + Double Confirmation
+│   ├── lag-monitor.ts      # Lag Monitor (spot ↔ poly, co 5s)
+│   ├── binance-ws.ts       # Binance WebSocket feed (BTCUSDT, ETHUSDT)
 │   ├── polymarket.ts       # Integracja Polymarket CLOB API
+│   ├── backfill.ts         # Wypełnianie danymi historycznymi
 │   └── init-db.ts          # Inicjalizacja bazy danych
 ├── sidecar/
 │   ├── main.py             # FastAPI + Chronos inference
@@ -314,13 +428,14 @@ C:\Users\markowyy\Documents\Polymarket\
 ├── dashboard/
 │   ├── app/
 │   │   ├── page.tsx        # Główny layout dashboardu
-│   │   └── api/            # Endpointy: edges, equity, stats, pnl, system-status
+│   │   └── api/            # Endpointy: edges, equity, stats, pnl, system-status, lag
 │   └── components/
 │       ├── PnlChart.tsx    # Wykres PNL per rynek (5 zakładek)
 │       ├── SignalCard.tsx  # Ostatni sygnał z POLY LIVE badge
 │       ├── TradeLedger.tsx # Historia transakcji (przewijana)
 │       ├── MarketYield.tsx # Trafność per rynek
-│       └── StatsBar.tsx    # Górny pasek KPI
+│       ├── StatsBar.tsx    # Górny pasek KPI
+│       └── LagMonitor.tsx  # Wizualizacja Lag Monitora (wykres + snapshot)
 ├── backtest/
 │   ├── simulate.py         # Symulacja flat bet z filtrami
 │   ├── simulate_all.py     # Raport wszystkich rynków
@@ -328,7 +443,11 @@ C:\Users\markowyy\Documents\Polymarket\
 │   ├── kelly.py            # Kelly sizing backtest
 │   └── diagnose.py         # Diagnostyka cen yes_price
 ├── research/
-│   └── calibration.py      # Kalibracja modelu (Brier score, ECE)
+│   ├── calibration.py      # Kalibracja modelu (Brier score, ECE)
+│   ├── calibrate_lag.py    # Kalibracja Lag Monitora (sensitivity, threshold)
+│   ├── recalibrate_confidence.py  # Platt scaling (Brier 0.44→0.25)
+│   ├── correlate_signals.py       # Korelacja Chronos vs Lag Monitor
+│   └── db_status.py        # Szybki podgląd bazy danych
 ├── kronos.db               # Baza SQLite (persystentna)
 ├── schema.sql              # Schemat bazy danych
 ├── start.bat               # Uruchamia wszystkie 3 serwisy
@@ -337,13 +456,29 @@ C:\Users\markowyy\Documents\Polymarket\
 
 ---
 
-## 14. Ważne ostrzeżenia
+## 15. Historia kalibracji
+
+| Data | Co się stało | Wynik |
+|---|---|---|
+| 2026-04-26 | Pierwsze uruchomienie bota | Zbieranie danych |
+| 2026-05-06 | Pierwsza analiza (137 trades, 51.8% WR) | Sensitivity 50 (za niskie) |
+| 2026-05-08 | Kalibracja Lag Monitora v1 | sensitivity 444/383/251/202, threshold 13pp |
+| 2026-05-08 | Platt Scaling v1 | Brier Score 0.37→0.25 |
+| 2026-05-10 | 48h danych: Chronos = 49.9% WR (random) | Potwierdzenie overconfidence |
+| 2026-05-10 | Kalibracja Lag Monitora v2 | sensitivity 598/553/331/286, threshold 17.4pp |
+| 2026-05-10 | Platt Scaling v2 (nowe dane) | Brier Score 0.44→0.25 |
+| 2026-05-10 | Korelacja sygnałów: Double Confirmation | 68.4% WR (19 trades) |
+| 2026-05-10 | Wdrożenie Double Confirmation w kodzie | 🟢DC/🔴DC w logu bota |
+
+---
+
+## 16. Ważne ostrzeżenia
 
 > **To jest system badawczy, nie produkcyjny bot tradingowy.**
 >
 > - Backtest accuracy ≠ live trading edge
 > - Chronos nie był trenowany na danych krypto/Polymarket
-> - 137 trades (1 dzień) to za mało na statystycznie istotne wnioski
+> - 19 zgodnych trades Double Confirmation to za mało na statystycznie istotne wnioski
 > - Polymarket ma Region Restrictions — sprawdź regulamin przed handlem
 > - Nie inwestuj więcej niż możesz stracić
 >
@@ -351,4 +486,4 @@ C:\Users\markowyy\Documents\Polymarket\
 
 ---
 
-*Wygenerowano automatycznie przez KRONOS TERMINAL v1.0*
+*Wygenerowano automatycznie przez KRONOS TERMINAL v2.0*

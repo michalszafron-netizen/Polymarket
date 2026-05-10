@@ -6,6 +6,7 @@ import { PnlChart } from "@/components/PnlChart";
 import { TradeLedger } from "@/components/TradeLedger";
 import { StatsBar } from "@/components/StatsBar";
 import { MarketYield } from "@/components/MarketYield";
+import { LagMonitor } from "@/components/LagMonitor";
 
 const MARKETS = [
   "BTC 5-Min Up/Down",
@@ -368,11 +369,14 @@ export default function Home() {
             )}
           </div>
 
+          {/* Lag Monitor — Spot vs Polymarket lag detection */}
+          <LagMonitor />
+
           {/* Activity Ribbon */}
           <div className="bx ribbon" style={{ marginTop: '12px', padding: '10px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', position: 'relative' }}>
             <span className="c-tl"></span><span className="c-tr"></span><span className="c-bl"></span><span className="c-br"></span>
             <div className="ribbon-text mono" style={{ fontSize: '10px', color: 'var(--dark)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              [SYS] Poly Oracle online... [OK] Fetching ByBit data... [OK] Scanning Poly markets... [OK]
+              [SYS] Poly Oracle online... [OK] Binance WS streaming... [OK] Fetching ByBit data... [OK] Scanning Poly markets... [OK]
             </div>
           </div>
         </div>

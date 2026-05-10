@@ -2,7 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../ArbitrageBot/ClaudeMOnster/PythOracle"
 		}
-	],
-	"settings": {}
+	]
 }

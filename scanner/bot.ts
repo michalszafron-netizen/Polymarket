@@ -13,6 +13,8 @@
 import Database from "better-sqlite3";
 import { resolve } from "path";
 import { getPolyPrice } from "./polymarket.js";
+import { startBinanceFeed, isFeedHealthy } from "./binance-ws.js";
+import { startLagMonitor, getLatestLagSignal } from "./lag-monitor.js";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -148,6 +150,22 @@ async function callSidecar(
   return res.json() as Promise<SidecarResponse>;
 }
 
+// ─── Platt scaling recalibration ───────────────────────────────────────────
+// Wygenerowane: python research/recalibrate_confidence.py (2026-05-10)
+// Brier Score: 0.44 → 0.25 po Platt scaling (na 87-211 resolved edges/rynek)
+const PLATT: Record<string, [number, number]> = {
+  "BTC 5-Min Up/Down":  [1.0997, -1.1046],
+  "ETH 5-Min Up/Down":  [-3.1659, 2.8221],
+  "BTC 15-Min Up/Down": [-2.4435, 2.2109],
+  "ETH 15-Min Up/Down": [-0.0433, -0.1152],
+};
+
+function recalibrate(rawConfidence: number, market: string): number {
+  const [A, B] = PLATT[market] ?? [1, 0];
+  const z = A * rawConfidence + B;
+  return 1 / (1 + Math.exp(-z));  // sigmoid
+}
+
 // ─── EV & Kelly Computation ────────────────────────────────────────────────
 
 function computeEV(confidence: number, yesPrice: number): number {
@@ -222,14 +240,26 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
 
     // Kupujemy YES gdy UP, NO gdy DOWN
     const betPrice = pred.direction === "UP" ? yesPrice : (1 - yesPrice);
-    const ev    = computeEV(pred.confidence, betPrice);
-    const kelly = computeKelly(pred.confidence, betPrice);
 
-    // 5. Write to SQLite
+    // Rekalibracja Platt scaling — Chronos overconfident fix
+    const rawConf = pred.confidence;
+    const calConf = recalibrate(rawConf, market.name);
+
+    const ev    = computeEV(calConf, betPrice);
+    const kelly = computeKelly(calConf, betPrice);
+
+    // 5. Double Confirmation — sprawdź czy Lag Monitor daje ten sam sygnał
+    const lagSignal = getLatestLagSignal(market.name);
+    const chronosUp = pred.direction === "UP";
+    const lagBuyYes = lagSignal === "BUY_YES";
+    const signalsAgree = (chronosUp && lagBuyYes) || (!chronosUp && lagSignal === "BUY_NO");
+    const lagStatus = lagSignal === "NONE" ? "⏳" : (signalsAgree ? "✅" : "❌");
+
+    // 6. Write to SQLite (RAW confidence — skalibrowane tylko dla EV/Kelly)
     insertEdge.run(
       market.name,
       pred.direction,
-      pred.confidence,
+      rawConf,                 // ← RAW confidence (dla backtestów i rekalibracji)
       pred.prob_up,
       pred.prob_down,
       yesPrice,
@@ -241,19 +271,21 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
       pred.inference_ms
     );
 
-    // 6. Log
+    // 7. Log (pokaż raw → calibrated + double confirmation)
     const evPct    = (ev * 100).toFixed(1);
-    const confPct  = (pred.confidence * 100).toFixed(1);
+    const rawPct   = (rawConf * 100).toFixed(0);
+    const calPct   = (calConf * 100).toFixed(0);
     const kellyPct = (kelly * 100).toFixed(1);
     const symbol   = market.symbol.replace("USDT", "");
     const modeTag  = pred.mode === "chronos" ? "🤖" : "📊";
     const winTag   = inWindow ? "✅" : "⏰";
+    const agreeTag = signalsAgree ? " 🟢DC" : (lagSignal === "NONE" ? "" : " 🔴DC");
 
     console.log(
       `  ${winTag} ${modeTag} ${symbol} ${market.horizonMin}M → ` +
-      `${pred.direction} ${confPct}% | ` +
+      `${pred.direction} ${rawPct}%→${calPct}% cal | ` +
       `EV ${evPct}% | K ${kellyPct}% | ` +
-      `${pred.inference_ms}ms [${priceTag}]`
+      `${pred.inference_ms}ms [${priceTag}]${agreeTag}`
     );
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -268,8 +300,9 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
       const polyPrice = await getPolyPrice(market.name);
       const yesPrice  = polyPrice?.yes ?? CONFIG.defaultYesPrice;
       const betPrice2 = pred.direction === "UP" ? yesPrice : (1 - yesPrice);
-      const ev        = computeEV(pred.confidence, betPrice2);
-      const kelly     = computeKelly(pred.confidence, betPrice2);
+      const calConf2  = recalibrate(pred.confidence, market.name);
+      const ev        = computeEV(calConf2, betPrice2);
+      const kelly     = computeKelly(calConf2, betPrice2);
       insertEdge.run(
         market.name, pred.direction, pred.confidence, pred.prob_up, pred.prob_down,
         yesPrice, ev, kelly, market.horizonMin,
@@ -361,6 +394,21 @@ async function main(): Promise<void> {
   if (!sidecarReady) {
     console.error("❌ Sidecar not reachable after 30 attempts. Exiting.");
     process.exit(1);
+  }
+
+  // ── Uruchom Binance WS feed + lag monitor (równolegle) ───────────────
+  startBinanceFeed();
+
+  // Poczekaj max 10s aż WS się połączy i przyjmie pierwsze ticki
+  for (let i = 0; i < 20; i++) {
+    if (isFeedHealthy()) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (isFeedHealthy()) {
+    console.log("✅ Binance WS healthy — starting lag monitor");
+    startLagMonitor();
+  } else {
+    console.warn("⚠️  Binance WS not healthy after 10s — lag monitor NOT started (scan will work normally)");
   }
 
   // Synchronizuj z granicą 5-minutową zegara UTC
