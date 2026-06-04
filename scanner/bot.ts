@@ -16,6 +16,7 @@ import { getPolyPrice } from "./polymarket.js";
 import { startBinanceFeed, isFeedHealthy } from "./binance-ws.js";
 import { startLagMonitor, getLatestLagSignal } from "./lag-monitor.js";
 import { execute, type EdgeSignal } from "../trader/trader.js";
+import { runRedeemer } from "../trader/redeemer.js";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -434,6 +435,8 @@ async function resolveOldEdges(): Promise<void> {
   }
 }
 
+let redeemerRunning = false;
+
 async function runScanCycle(): Promise<void> {
   const ts = new Date().toISOString().slice(0, 19);
   console.log(`\n━━━ SCAN CYCLE ${ts} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
@@ -458,6 +461,14 @@ async function runScanCycle(): Promise<void> {
     ? ` | DC ${SESSION.dcAgree}✅ ${SESSION.dcConflict}❌ (${((SESSION.dcAgree / SESSION.dcTotal) * 100).toFixed(0)}% WR)`
     : "";
   console.log(`━━━ ${CONFIG.markets.length} markets | ${totalEdges} edges | cycle #${SESSION.cycles}${dcWr} ━━━`);
+
+  // Auto-redeem co 6 cykli (30 min) — nie blokuje następnego scanu
+  if (SESSION.cycles % 6 === 1 && !redeemerRunning) {
+    redeemerRunning = true;
+    runRedeemer()
+      .catch(e => console.error("[REDEEMER]", e instanceof Error ? e.message : e))
+      .finally(() => { redeemerRunning = false; });
+  }
 }
 
 async function main(): Promise<void> {
