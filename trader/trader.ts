@@ -99,8 +99,8 @@ async function submitOrder(
   const makerAmount   = String(Math.round(tokensRaw * price * 1e6));  // USDC
 
   const salt          = String(Math.floor(Math.random() * 1e15));
-  const orderTs      = Math.floor(Date.now() / 1000);  // seconds
-  const hmacTimestamp = orderTs;
+  const orderTs      = String(Date.now());  // milliseconds as string
+  const hmacTimestamp = Math.floor(Date.now() / 1000);  // seconds for HMAC
 
   const orderToSign = {
     salt,
@@ -111,13 +111,13 @@ async function submitOrder(
     takerAmount,
     side:          0,           // BUY = 0
     signatureType: 2,           // POLY_PROXY
-    timestamp:     String(orderTs),
+    timestamp:     orderTs,
     metadata:      ZERO_BYTES32,
     builder:       ZERO_BYTES32,
   };
 
   const domain = {
-    name:              "Polymarket CTF Exchange",
+    name:              "CtfExchange",
     version:           "2",
     chainId:           137,
     verifyingContract: EXCHANGE_V2,
@@ -128,15 +128,18 @@ async function submitOrder(
 
   const payload = {
     deferExec: false,
+    postOnly:  false,
     order: {
       salt:          parseInt(salt, 10),
       maker:         CFG.proxyWallet,
       signer:        wallet.address,
+      taker:         "0x0000000000000000000000000000000000000000",
       tokenId,
       makerAmount,
       takerAmount,
       side:          "BUY",
       signatureType: 2,
+      expiration:    "0",
       timestamp:     orderTs,
       metadata:      ZERO_BYTES32,
       builder:       ZERO_BYTES32,
