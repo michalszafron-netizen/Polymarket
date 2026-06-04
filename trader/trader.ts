@@ -81,7 +81,7 @@ async function submitOrder(
     },
   });
 
-  const size = parseFloat((sizeUsdc / price).toFixed(2));
+  const size = Math.max(parseFloat((sizeUsdc / price).toFixed(2)), 5);
   console.log(`     [DBG] tokenId=${tokenId} price=${price} size=${size}`);
 
   const resp = await client.createAndPostOrder(
