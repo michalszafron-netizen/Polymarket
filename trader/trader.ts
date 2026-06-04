@@ -1,26 +1,25 @@
 /**
- * KRONOS TRADER — Silnik wykonywania zleceń na Polymarket CLOB
+ * KRONOS TRADER — Silnik wykonywania zleceń na Polymarket CLOB (V2 Exchange)
  *
  * TRYBY:
  *   DRY_RUN=true  (domyślny) → symuluje, nie wydaje pieniędzy
  *   DRY_RUN=false             → prawdziwy handel
- *
- * Wywołanie z bot.ts:
- *   const result = await trader.execute(edge);
  */
 
+import { createHmac } from "node:crypto";
 import { TRADER_CONFIG as CFG } from "./config.js";
 
 // ── Typy ──────────────────────────────────────────────────────────────────
 
 export interface EdgeSignal {
-  market:     string;   // "BTC 5-Min Up/Down"
+  market:     string;
   direction:  "UP" | "DOWN";
-  confidence: number;   // 0-1
-  yes_price:  number;   // aktualna cena YES z Polymarket
-  ev:         number;   // Expected Value (0.08 = 8%)
-  kelly:      number;   // Kelly fraction (0-1)
-  tokenId:    string;   // YES token ID z Polymarket
+  confidence: number;
+  yes_price:  number;
+  ev:         number;
+  kelly:      number;
+  yesToken:   string;
+  noToken:    string;
 }
 
 export interface TradeResult {
@@ -50,41 +49,132 @@ function validateEdge(edge: EdgeSignal): { ok: boolean; reason?: string } {
 }
 
 function calcPositionSize(edge: EdgeSignal, bankrollUsd: number): number {
-  // Kelly * bankroll * kellyFraction, ale max maxPositionUsd
   const kellySize = edge.kelly * bankrollUsd * CFG.kellyFraction;
   const pctSize   = bankrollUsd * CFG.maxBankrollPct;
   return Math.min(kellySize, pctSize, CFG.maxPositionUsd);
 }
 
-// ── CLOB Order execution ─────────────────────────────────────────────────
+// ── HMAC helper ─────────────────────────────────────────────────────────
+
+function buildHmac(secret: string, ts: number, method: string, path: string, body: string): string {
+  const message = `${ts}${method}${path}${body}`;
+  const key = Buffer.from(secret, "base64");
+  const sig = createHmac("sha256", key).update(message).digest("base64");
+  return sig.replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+// ── Polymarket V2 order signing + submission ──────────────────────────────
+
+// Polymarket deployed new exchange contracts in 2026.
+// The old clob-client (v4.x) signs against the old 0x4bFb... address → order_version_mismatch.
+// We sign directly against the new V2 exchange.
+const EXCHANGE_V2     = "0xE111180000d2663C0091e4f400237545B87B996B";
+const ZERO_BYTES32    = "0x" + "00".repeat(32);
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt",          type: "uint256" },
+    { name: "maker",         type: "address" },
+    { name: "signer",        type: "address" },
+    { name: "tokenId",       type: "uint256" },
+    { name: "makerAmount",   type: "uint256" },
+    { name: "takerAmount",   type: "uint256" },
+    { name: "side",          type: "uint8"   },
+    { name: "signatureType", type: "uint8"   },
+    { name: "timestamp",     type: "uint256" },
+    { name: "metadata",      type: "bytes32" },
+    { name: "builder",       type: "bytes32" },
+  ],
+} as const;
 
 async function submitOrder(
   tokenId:  string,
-  side:     "BUY",
   price:    number,
   sizeUsdc: number
 ): Promise<string> {
-  // Importy dynamiczne — clob-client musi być zainstalowany
-  const { ClobClient }   = await import("@polymarket/clob-client");
-  const { Wallet }       = await import("ethers");
+  const { ethers } = await import("ethers");
+  const wallet = new ethers.Wallet(CFG.privateKey);
 
-  const wallet = new Wallet(CFG.privateKey);
-  const client = new ClobClient(
-    CFG.clobApiUrl,
-    CFG.chainId,
-    wallet,
-    { key: CFG.apiKey, secret: CFG.apiSecret, passphrase: CFG.apiPassphrase }
-  );
+  // Amounts in micro-units (6 decimals), BUY: maker pays USDC, gets tokens
+  const tokensRaw     = Math.floor((sizeUsdc / price) * 100) / 100;  // round down to 2 dp
+  const takerAmount   = String(Math.round(tokensRaw * 1e6));          // conditional tokens
+  const makerAmount   = String(Math.round(tokensRaw * price * 1e6));  // USDC
 
-  const order = await client.createOrder({
-    tokenID:   tokenId,
-    side:      side,
-    price:     price,
-    size:      sizeUsdc / price, // liczba tokenów = USDC / cena
+  const salt      = String(Math.floor(Math.random() * 1e15));
+  const timestamp = Math.floor(Date.now() / 1000);
+
+  const orderToSign = {
+    salt,
+    maker:         CFG.proxyWallet,
+    signer:        wallet.address,
+    tokenId,
+    makerAmount,
+    takerAmount,
+    side:          0,           // BUY = 0
+    signatureType: 2,           // POLY_PROXY
+    timestamp:     String(timestamp),
+    metadata:      ZERO_BYTES32,
+    builder:       ZERO_BYTES32,
+  };
+
+  const domain = {
+    name:             "Polymarket CTF Exchange",
+    version:          "2",
+    chainId:          137,
+    verifyingContract: EXCHANGE_V2,
+  };
+
+  const signature = await wallet.signTypedData(domain, ORDER_TYPES, orderToSign);
+
+  const payload = {
+    deferExec: false,
+    orderType: "GTC",
+    owner:     CFG.apiKey,
+    order: {
+      salt:          parseInt(salt, 10),
+      maker:         CFG.proxyWallet,
+      signer:        wallet.address,
+      tokenId,
+      makerAmount,
+      takerAmount,
+      side:          "BUY",
+      signatureType: 2,
+      timestamp,
+      metadata:      ZERO_BYTES32,
+      builder:       ZERO_BYTES32,
+      expiration:    "0",
+      signature,
+    },
+  };
+
+  const bodyStr = JSON.stringify(payload);
+  const hmacSig = buildHmac(CFG.apiSecret, timestamp, "POST", "/order", bodyStr);
+
+  const headers: Record<string, string> = {
+    "Content-Type":   "application/json",
+    POLY_ADDRESS:     wallet.address,
+    POLY_SIGNATURE:   hmacSig,
+    POLY_TIMESTAMP:   String(timestamp),
+    POLY_API_KEY:     CFG.apiKey,
+    POLY_PASSPHRASE:  CFG.apiPassphrase,
+  };
+
+  const resp = await fetch(`${CFG.clobApiUrl}/order`, {
+    method: "POST",
+    headers,
+    body: bodyStr,
+    signal: AbortSignal.timeout(10000),
   });
 
-  const resp = await client.postOrder(order, "GTC"); // Good Till Cancelled
-  return resp.orderID ?? "unknown";
+  const raw = await resp.text();
+  console.log(`     [CLOB] ${resp.status}: ${raw.slice(0, 300)}`);
+
+  let result: { orderID?: string; error?: string; errorCode?: string };
+  try { result = JSON.parse(raw); } catch { throw new Error(`Non-JSON response: ${raw.slice(0, 200)}`); }
+
+  if (result.error || result.errorCode)
+    throw new Error(String(result.error ?? result.errorCode));
+
+  return result.orderID ?? "submitted";
 }
 
 // ── Główna funkcja ────────────────────────────────────────────────────────
@@ -93,14 +183,12 @@ export async function execute(
   edge:        EdgeSignal,
   bankrollUsd: number = 100
 ): Promise<TradeResult> {
-  // Określ który token kupujemy
   const side      = edge.direction === "UP" ? "YES" : "NO";
   const betPrice  = edge.direction === "UP" ? edge.yes_price : (1 - edge.yes_price);
   const sizeUsd   = calcPositionSize(edge, bankrollUsd);
   const payout    = sizeUsd / betPrice;
   const expectedPnl = sizeUsd * edge.ev;
 
-  // Walidacja
   const check = validateEdge(edge);
   if (!check.ok) {
     return { status: "skipped", reason: check.reason, side, price: betPrice, sizeUsd: 0, payout: 0, expectedPnl: 0 };
@@ -114,20 +202,15 @@ export async function execute(
   console.log(`     EV:       +${(edge.ev*100).toFixed(1)}%  |  Kelly: ${(edge.kelly*100).toFixed(1)}%`);
   console.log(`     Expected: +$${expectedPnl.toFixed(2)}`);
 
-  // DRY RUN — tylko symulacja
   if (CFG.dryRun) {
     console.log(`     Status:   🧪 DRY RUN — zlecenie NIE zostało wysłane`);
     console.log(`               Ustaw DRY_RUN=false w .env żeby handlować live\n`);
     return { status: "dry-run", side, price: betPrice, sizeUsd, payout, expectedPnl };
   }
 
-  // LIVE — prawdziwe zlecenie
   try {
-    const tokenId = edge.direction === "UP"
-      ? edge.tokenId                          // YES token
-      : edge.tokenId.replace("YES", "NO");    // NO token (uproszczenie)
-
-    const orderId = await submitOrder(tokenId, "BUY", betPrice, sizeUsd);
+    const tokenId = edge.direction === "UP" ? edge.yesToken : edge.noToken;
+    const orderId = await submitOrder(tokenId, betPrice, sizeUsd);
     console.log(`     Status:   ✅ ZLECENIE WYSŁANE | ID: ${orderId}\n`);
     return { status: "executed", orderId, side, price: betPrice, sizeUsd, payout, expectedPnl };
 
