@@ -131,8 +131,9 @@ async function submitOrder(
   console.log(`     [DBG] payload salt=${salt} maker=${CFG.proxyWallet} tokenId=${tokenId}`);
 
   const payload = {
+    deferExec: false,
     order: {
-      salt,
+      salt:          parseInt(salt, 10),
       maker:         CFG.proxyWallet,
       signer:        wallet.address,
       taker:         ZERO_ADDRESS,
