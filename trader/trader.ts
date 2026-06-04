@@ -147,6 +147,7 @@ async function submitOrder(
   };
 
   const bodyStr = JSON.stringify(payload);
+  console.log(`     [DBG BODY] ${bodyStr}`);
   const hmacSig = buildHmac(CFG.apiSecret, hmacTimestamp, "POST", "/order", bodyStr);
 
   const headers: Record<string, string> = {
