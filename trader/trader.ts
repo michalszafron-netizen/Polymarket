@@ -6,7 +6,6 @@
  *   DRY_RUN=false             → prawdziwy handel
  */
 
-import { createHmac } from "node:crypto";
 import { TRADER_CONFIG as CFG } from "./config.js";
 
 // ── Typy ──────────────────────────────────────────────────────────────────
@@ -54,131 +53,48 @@ function calcPositionSize(edge: EdgeSignal, bankrollUsd: number): number {
   return Math.min(kellySize, pctSize, CFG.maxPositionUsd);
 }
 
-// ── HMAC helper ─────────────────────────────────────────────────────────
-
-function buildHmac(secret: string, ts: number, method: string, path: string, body: string): string {
-  const message = `${ts}${method}${path}${body}`;
-  const key = Buffer.from(secret, "base64");
-  const sig = createHmac("sha256", key).update(message).digest("base64");
-  return sig.replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-// ── Polymarket V2 order signing + submission ──────────────────────────────
-
-// New V2 exchange: version "2", new 11-field struct (no taker/nonce/feeRateBps, adds timestamp/metadata/builder).
-// Payload requires deferExec:false and salt as integer (schema validation).
-const EXCHANGE_V2  = "0xE111180000d2663C0091e4f400237545B87B996B";
-const ZERO_BYTES32 = "0x" + "00".repeat(32);
-const ORDER_TYPES = {
-  Order: [
-    { name: "salt",          type: "uint256" },
-    { name: "maker",         type: "address" },
-    { name: "signer",        type: "address" },
-    { name: "tokenId",       type: "uint256" },
-    { name: "makerAmount",   type: "uint256" },
-    { name: "takerAmount",   type: "uint256" },
-    { name: "side",          type: "uint8"   },
-    { name: "signatureType", type: "uint8"   },
-    { name: "timestamp",     type: "uint256" },
-    { name: "metadata",      type: "bytes32" },
-    { name: "builder",       type: "bytes32" },
-  ],
-} as const;
+// ── Polymarket V2 order submission via official clob-client-v2 ───────────
 
 async function submitOrder(
   tokenId:  string,
   price:    number,
   sizeUsdc: number
 ): Promise<string> {
-  const { ethers } = await import("ethers");
-  const wallet = new ethers.Wallet(CFG.privateKey);
+  const { createWalletClient, http } = await import("viem");
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const { ClobClient, Chain, Side, OrderType, SignatureTypeV2 } =
+    await import("@polymarket/clob-client-v2");
 
-  // Amounts in micro-units (6 decimals), BUY: maker pays USDC, gets tokens
-  const tokensRaw     = Math.floor((sizeUsdc / price) * 100) / 100;  // round down to 2 dp
-  const takerAmount   = String(Math.round(tokensRaw * 1e6));          // conditional tokens
-  const makerAmount   = String(Math.round(tokensRaw * price * 1e6));  // USDC
+  const account    = privateKeyToAccount(CFG.privateKey as `0x${string}`);
+  const walletClient = createWalletClient({ account, transport: http() });
 
-  const salt          = String(Math.floor(Math.random() * 1e15));
-  const orderTs      = String(Date.now());  // milliseconds as string
-  const hmacTimestamp = Math.floor(Date.now() / 1000);  // seconds for HMAC
-
-  const orderToSign = {
-    salt,
-    maker:         wallet.address,  // EOA = deposit address
-    signer:        wallet.address,
-    tokenId,
-    makerAmount,
-    takerAmount,
-    side:          0,           // BUY = 0
-    signatureType: 0,           // EOA
-    timestamp:     orderTs,
-    metadata:      ZERO_BYTES32,
-    builder:       ZERO_BYTES32,
-  };
-
-  const domain = {
-    name:              "CtfExchange",
-    version:           "2",
-    chainId:           137,
-    verifyingContract: EXCHANGE_V2,
-  };
-
-  const signature = await wallet.signTypedData(domain, ORDER_TYPES, orderToSign);
-  console.log(`     [DBG] payload salt=${salt} maker=${CFG.proxyWallet} tokenId=${tokenId}`);
-
-  const payload = {
-    deferExec: false,
-    postOnly:  false,
-    order: {
-      salt:          parseInt(salt, 10),
-      maker:         wallet.address,  // EOA
-      signer:        wallet.address,
-      taker:         "0x0000000000000000000000000000000000000000",
-      tokenId,
-      makerAmount,
-      takerAmount,
-      side:          "BUY",
-      signatureType: 0,           // EOA
-      expiration:    "0",
-      timestamp:     orderTs,
-      metadata:      ZERO_BYTES32,
-      builder:       ZERO_BYTES32,
-      signature,
+  const client = new ClobClient({
+    host:            CFG.clobApiUrl,
+    chain:           Chain.POLYGON,
+    signer:          walletClient,
+    signatureType:   SignatureTypeV2.POLY_1271,
+    funderAddress:   CFG.proxyWallet,   // deposit wallet address from .env
+    creds: {
+      key:        CFG.apiKey,
+      secret:     CFG.apiSecret,
+      passphrase: CFG.apiPassphrase,
     },
-    owner:     CFG.apiKey,
-    orderType: "GTC",
-  };
-
-  const bodyStr = JSON.stringify(payload);
-  console.log(`     [DBG BODY] ${bodyStr}`);
-  const hmacSig = buildHmac(CFG.apiSecret, hmacTimestamp, "POST", "/order", bodyStr);
-
-  const headers: Record<string, string> = {
-    "Content-Type":   "application/json",
-    POLY_ADDRESS:     wallet.address,
-    POLY_SIGNATURE:   hmacSig,
-    POLY_TIMESTAMP:   String(hmacTimestamp),
-    POLY_API_KEY:     CFG.apiKey,
-    POLY_PASSPHRASE:  CFG.apiPassphrase,
-  };
-
-  const resp = await fetch(`${CFG.clobApiUrl}/order`, {
-    method: "POST",
-    headers,
-    body: bodyStr,
-    signal: AbortSignal.timeout(10000),
   });
 
-  const raw = await resp.text();
-  console.log(`     [CLOB] ${resp.status}: ${raw.slice(0, 300)}`);
+  const size = parseFloat((sizeUsdc / price).toFixed(2));
+  console.log(`     [DBG] tokenId=${tokenId} price=${price} size=${size}`);
 
-  let result: { orderID?: string; error?: string; errorCode?: string };
-  try { result = JSON.parse(raw); } catch { throw new Error(`Non-JSON response: ${raw.slice(0, 200)}`); }
+  const resp = await client.createAndPostOrder(
+    { tokenID: tokenId, price, side: Side.BUY, size },
+    { tickSize: "0.01", negRisk: false },
+    OrderType.GTC,
+  );
 
-  if (result.error || result.errorCode)
-    throw new Error(String(result.error ?? result.errorCode));
+  console.log(`     [CLOB v2] ${JSON.stringify(resp).slice(0, 300)}`);
 
-  return result.orderID ?? "submitted";
+  const r = resp as { orderID?: string; error?: string };
+  if (r.error) throw new Error(r.error);
+  return r.orderID ?? "submitted";
 }
 
 // ── Główna funkcja ────────────────────────────────────────────────────────

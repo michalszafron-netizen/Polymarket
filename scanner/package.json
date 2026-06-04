@@ -9,8 +9,13 @@
     "init-db": "tsx init-db.ts"
   },
   "dependencies": {
+    "@polymarket/clob-client": "^4.22.8",
+    "@polymarket/clob-client-v2": "^1.0.0",
+    "viem": "^2.0.0",
     "@types/ws": "^8.18.1",
     "better-sqlite3": "^11.9.1",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.16.0",
     "node-fetch": "^3.3.2",
     "ws": "^8.20.0"
   },
