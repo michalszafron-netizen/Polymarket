@@ -104,13 +104,13 @@ async function submitOrder(
 
   const orderToSign = {
     salt,
-    maker:         CFG.proxyWallet,
+    maker:         wallet.address,  // EOA = deposit address
     signer:        wallet.address,
     tokenId,
     makerAmount,
     takerAmount,
     side:          0,           // BUY = 0
-    signatureType: 1,           // POLY_PROXY (V2: was 2 in old system)
+    signatureType: 0,           // EOA
     timestamp:     orderTs,
     metadata:      ZERO_BYTES32,
     builder:       ZERO_BYTES32,
@@ -131,14 +131,14 @@ async function submitOrder(
     postOnly:  false,
     order: {
       salt:          parseInt(salt, 10),
-      maker:         CFG.proxyWallet,
+      maker:         wallet.address,  // EOA
       signer:        wallet.address,
       taker:         "0x0000000000000000000000000000000000000000",
       tokenId,
       makerAmount,
       takerAmount,
       side:          "BUY",
-      signatureType: 1,           // POLY_PROXY (V2)
+      signatureType: 0,           // EOA
       expiration:    "0",
       timestamp:     orderTs,
       metadata:      ZERO_BYTES32,
