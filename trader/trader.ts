@@ -99,8 +99,9 @@ async function submitOrder(
   const takerAmount   = String(Math.round(tokensRaw * 1e6));          // conditional tokens
   const makerAmount   = String(Math.round(tokensRaw * price * 1e6));  // USDC
 
-  const salt      = String(Math.floor(Math.random() * 1e15));
-  const timestamp = Math.floor(Date.now() / 1000);
+  const salt           = String(Math.floor(Math.random() * 1e15));
+  const orderTimestamp = Math.floor(Date.now() / 1000);  // seconds — matches EVM block.timestamp
+  const hmacTimestamp  = orderTimestamp;
 
   const orderToSign = {
     salt,
@@ -111,7 +112,7 @@ async function submitOrder(
     takerAmount,
     side:          0,           // BUY = 0
     signatureType: 2,           // POLY_PROXY
-    timestamp:     String(timestamp),
+    timestamp:     String(orderTimestamp),
     metadata:      ZERO_BYTES32,
     builder:       ZERO_BYTES32,
   };
@@ -126,11 +127,10 @@ async function submitOrder(
   const signature = await wallet.signTypedData(domain, ORDER_TYPES, orderToSign);
 
   const payload = {
-    deferExec: false,
     orderType: "GTC",
     owner:     CFG.apiKey,
     order: {
-      salt:          parseInt(salt, 10),
+      salt,
       maker:         CFG.proxyWallet,
       signer:        wallet.address,
       tokenId,
@@ -138,22 +138,21 @@ async function submitOrder(
       takerAmount,
       side:          "BUY",
       signatureType: 2,
-      timestamp,
+      timestamp:     orderTimestamp,
       metadata:      ZERO_BYTES32,
       builder:       ZERO_BYTES32,
-      expiration:    "0",
       signature,
     },
   };
 
   const bodyStr = JSON.stringify(payload);
-  const hmacSig = buildHmac(CFG.apiSecret, timestamp, "POST", "/order", bodyStr);
+  const hmacSig = buildHmac(CFG.apiSecret, hmacTimestamp, "POST", "/order", bodyStr);
 
   const headers: Record<string, string> = {
     "Content-Type":   "application/json",
     POLY_ADDRESS:     wallet.address,
     POLY_SIGNATURE:   hmacSig,
-    POLY_TIMESTAMP:   String(timestamp),
+    POLY_TIMESTAMP:   String(hmacTimestamp),
     POLY_API_KEY:     CFG.apiKey,
     POLY_PASSPHRASE:  CFG.apiPassphrase,
   };
