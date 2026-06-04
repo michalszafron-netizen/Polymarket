@@ -65,24 +65,27 @@ function buildHmac(secret: string, ts: number, method: string, path: string, bod
 
 // ── Polymarket V2 order signing + submission ──────────────────────────────
 
-// Polymarket deployed new exchange contracts in 2026.
-// The old clob-client (v4.x) signs against the old 0x4bFb... address → order_version_mismatch.
-// We sign directly against the new V2 exchange.
-const EXCHANGE_V2     = "0xE111180000d2663C0091e4f400237545B87B996B";
-const ZERO_BYTES32    = "0x" + "00".repeat(32);
+// CLOB API still accepts the old 12-field payload schema (taker/nonce/feeRateBps/expiration).
+// The new exchange V2 just changed verifyingContract + EIP-712 version "1"→"2".
+// Old clob-client uses old address 0x4bFb... → order_version_mismatch.
+// New 11-field format gets "Invalid order payload" (schema rejected before signature check).
+// Fix: old 12-field struct + new exchange address + version "2".
+const EXCHANGE_V2    = "0xE111180000d2663C0091e4f400237545B87B996B";
+const ZERO_ADDRESS   = "0x0000000000000000000000000000000000000000";
 const ORDER_TYPES = {
   Order: [
     { name: "salt",          type: "uint256" },
     { name: "maker",         type: "address" },
     { name: "signer",        type: "address" },
+    { name: "taker",         type: "address" },
     { name: "tokenId",       type: "uint256" },
     { name: "makerAmount",   type: "uint256" },
     { name: "takerAmount",   type: "uint256" },
+    { name: "expiration",    type: "uint256" },
+    { name: "nonce",         type: "uint256" },
+    { name: "feeRateBps",    type: "uint256" },
     { name: "side",          type: "uint8"   },
     { name: "signatureType", type: "uint8"   },
-    { name: "timestamp",     type: "uint256" },
-    { name: "metadata",      type: "bytes32" },
-    { name: "builder",       type: "bytes32" },
   ],
 } as const;
 
@@ -99,50 +102,52 @@ async function submitOrder(
   const takerAmount   = String(Math.round(tokensRaw * 1e6));          // conditional tokens
   const makerAmount   = String(Math.round(tokensRaw * price * 1e6));  // USDC
 
-  const salt           = String(Math.floor(Math.random() * 1e15));
-  const orderTimestamp = Math.floor(Date.now() / 1000);  // seconds — matches EVM block.timestamp
-  const hmacTimestamp  = orderTimestamp;
+  const salt          = String(Math.floor(Math.random() * 1e15));
+  const hmacTimestamp = Math.floor(Date.now() / 1000);
 
   const orderToSign = {
     salt,
     maker:         CFG.proxyWallet,
     signer:        wallet.address,
+    taker:         ZERO_ADDRESS,
     tokenId,
     makerAmount,
     takerAmount,
+    expiration:    "0",
+    nonce:         "0",
+    feeRateBps:    "0",
     side:          0,           // BUY = 0
     signatureType: 2,           // POLY_PROXY
-    timestamp:     String(orderTimestamp),
-    metadata:      ZERO_BYTES32,
-    builder:       ZERO_BYTES32,
   };
 
   const domain = {
-    name:             "Polymarket CTF Exchange",
-    version:          "2",
-    chainId:          137,
+    name:              "Polymarket CTF Exchange",
+    version:           "2",
+    chainId:           137,
     verifyingContract: EXCHANGE_V2,
   };
 
   const signature = await wallet.signTypedData(domain, ORDER_TYPES, orderToSign);
+  console.log(`     [DBG] payload salt=${salt} maker=${CFG.proxyWallet} tokenId=${tokenId}`);
 
   const payload = {
-    orderType: "GTC",
-    owner:     CFG.apiKey,
     order: {
       salt,
       maker:         CFG.proxyWallet,
       signer:        wallet.address,
+      taker:         ZERO_ADDRESS,
       tokenId,
       makerAmount,
       takerAmount,
+      expiration:    "0",
+      nonce:         "0",
+      feeRateBps:    "0",
       side:          "BUY",
       signatureType: 2,
-      timestamp:     orderTimestamp,
-      metadata:      ZERO_BYTES32,
-      builder:       ZERO_BYTES32,
       signature,
     },
+    owner:     CFG.apiKey,
+    orderType: "GTC",
   };
 
   const bodyStr = JSON.stringify(payload);
