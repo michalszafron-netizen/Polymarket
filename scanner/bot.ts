@@ -15,6 +15,7 @@ import { resolve } from "path";
 import { getPolyPrice } from "./polymarket.js";
 import { startBinanceFeed, isFeedHealthy } from "./binance-ws.js";
 import { startLagMonitor, getLatestLagSignal } from "./lag-monitor.js";
+import { execute, type EdgeSignal } from "../trader/trader.js";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -28,18 +29,43 @@ const CONFIG = {
   contextCandles: 50,                  // candles fed to model
   confGate: 0.55,                      // minimum confidence to record
   defaultYesPrice: 0.51,               // simulated Polymarket YES price
+  // Filtr bet_price (2026-05-23): tylko trades z wysokim payout
+  // Analiza 1467 trades: near-even (0.45-0.55) ma WR=47% vs BE=50% → -6% EV
+  // Trades z bet_price<0.45 mają WR=53-57% vs BE=27-41% → ogromny edge
+  maxBetPrice: 0.45,
   markets: [
-    { name: "BTC 5-Min Up/Down",  symbol: "BTCUSDT", interval: "5",  horizonMin: 5  },
-    { name: "ETH 5-Min Up/Down",  symbol: "ETHUSDT", interval: "5",  horizonMin: 5  },
-    { name: "BTC 15-Min Up/Down", symbol: "BTCUSDT", interval: "15", horizonMin: 15 },
-    { name: "ETH 15-Min Up/Down", symbol: "ETHUSDT", interval: "15", horizonMin: 15 },
+    { name: "BTC 5-Min Up/Down",  symbol: "BTCUSDT", interval: "5",  horizonMin: 5,  skipHoursUtc: [], active: true  },
+    { name: "ETH 5-Min Up/Down",  symbol: "ETHUSDT", interval: "5",  horizonMin: 5,  skipHoursUtc: [], active: true  },
+    { name: "BTC 15-Min Up/Down", symbol: "BTCUSDT", interval: "15", horizonMin: 15, skipHoursUtc: [6, 7, 8, 10, 11, 15, 18], active: true  },
+    // ETH 15M wyłączony (2026-05-23): rolling WR=36%, OOS=38.3% — poniżej break-even
+    { name: "ETH 15-Min Up/Down", symbol: "ETHUSDT", interval: "15", horizonMin: 15, skipHoursUtc: [], active: false },
   ],
+};
+
+// ─── Session counters (reset on restart) ──────────────────────────────────
+
+const SESSION = {
+  cycles:     0,
+  dcAgree:    0,   // Chronos + Lag zgodne
+  dcConflict: 0,   // Chronos + Lag sprzeczne
+  dcTotal:    0,   // łącznie sygnałów z Lag (nie NONE)
+  startedAt:  new Date().toISOString().slice(0, 19),
 };
 
 // ─── Database ──────────────────────────────────────────────────────────────
 
 const db = new Database(CONFIG.dbPath);
 db.pragma("journal_mode = WAL");
+
+// Migracja — dodaj kolumny DRY RUN jeśli nie istnieją (idempotentne)
+for (const sql of [
+  "ALTER TABLE edges ADD COLUMN traded        INTEGER DEFAULT 0",
+  "ALTER TABLE edges ADD COLUMN trade_dry_run INTEGER",
+  "ALTER TABLE edges ADD COLUMN trade_size_usd REAL",
+  "ALTER TABLE edges ADD COLUMN trade_order_id TEXT",
+]) {
+  try { db.exec(sql); } catch { /* kolumna już istnieje */ }
+}
 
 const insertEdge = db.prepare(`
   INSERT INTO edges (
@@ -51,6 +77,15 @@ const insertEdge = db.prepare(`
     ?, ?, ?, ?, ?,
     ?, ?
   )
+`);
+
+const markTraded = db.prepare(`
+  UPDATE edges SET
+    traded         = 1,
+    trade_dry_run  = ?,
+    trade_size_usd = ?,
+    trade_order_id = ?
+  WHERE id = ?
 `);
 
 const resolveEdges = db.prepare(`
@@ -151,13 +186,15 @@ async function callSidecar(
 }
 
 // ─── Platt scaling recalibration ───────────────────────────────────────────
-// Wygenerowane: python research/recalibrate_confidence.py (2026-05-10)
-// Brier Score: 0.44 → 0.25 po Platt scaling (na 87-211 resolved edges/rynek)
+// Wygenerowane: python research/recalibrate_confidence.py (2026-05-12)
+// Brier Score przed/po: BTC5M 0.4335→0.2499, ETH5M 0.4483→0.2482
+//                       BTC15M 0.3680→0.2466, ETH15M 0.3856→0.2485
+// Próbka v3: 424/438/160/166 resolved edges (10x więcej niż v1)
 const PLATT: Record<string, [number, number]> = {
-  "BTC 5-Min Up/Down":  [1.0997, -1.1046],
-  "ETH 5-Min Up/Down":  [-3.1659, 2.8221],
-  "BTC 15-Min Up/Down": [-2.4435, 2.2109],
-  "ETH 15-Min Up/Down": [-0.0433, -0.1152],
+  "BTC 5-Min Up/Down":  [-0.1231,  0.0845],
+  "ETH 5-Min Up/Down":  [-1.8713,  1.5900],
+  "BTC 15-Min Up/Down": [ 0.7311, -0.4302],
+  "ETH 15-Min Up/Down": [ 1.6770, -1.4257],
 };
 
 function recalibrate(rawConfidence: number, market: string): number {
@@ -203,6 +240,13 @@ function isValidEntry(intervalMin: number): boolean {
 // ─── Scan a single market ──────────────────────────────────────────────────
 
 async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> {
+  // Filtr godzinowy — pomiń dead zones UTC
+  const utcHour = new Date().getUTCHours();
+  if (market.skipHoursUtc.includes(utcHour)) {
+    console.log(`  ⏭️  ${market.name.split(" ")[0]} ${market.horizonMin}M: skip (UTC ${utcHour}:xx — dead zone)`);
+    return;
+  }
+
   try {
     // 1. Fetch candles
     const candles = await fetchCandles(
@@ -241,6 +285,13 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
     // Kupujemy YES gdy UP, NO gdy DOWN
     const betPrice = pred.direction === "UP" ? yesPrice : (1 - yesPrice);
 
+    // Filtr bet_price — pomiń near-even trades (EV ujemny przy WR~47%)
+    if (polyPrice && betPrice > CONFIG.maxBetPrice) {
+      const symbol = market.symbol.replace("USDT", "");
+      console.log(`  🚫 ${symbol} ${market.horizonMin}M: skip bet_price=${betPrice.toFixed(3)} > ${CONFIG.maxBetPrice} (near-even, brak edge)`);
+      return;
+    }
+
     // Rekalibracja Platt scaling — Chronos overconfident fix
     const rawConf = pred.confidence;
     const calConf = recalibrate(rawConf, market.name);
@@ -253,10 +304,15 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
     const chronosUp = pred.direction === "UP";
     const lagBuyYes = lagSignal === "BUY_YES";
     const signalsAgree = (chronosUp && lagBuyYes) || (!chronosUp && lagSignal === "BUY_NO");
-    const lagStatus = lagSignal === "NONE" ? "⏳" : (signalsAgree ? "✅" : "❌");
+    // Aktualizuj session counters
+    if (lagSignal !== "NONE") {
+      SESSION.dcTotal++;
+      if (signalsAgree) SESSION.dcAgree++;
+      else              SESSION.dcConflict++;
+    }
 
     // 6. Write to SQLite (RAW confidence — skalibrowane tylko dla EV/Kelly)
-    insertEdge.run(
+    const insertResult = insertEdge.run(
       market.name,
       pred.direction,
       rawConf,                 // ← RAW confidence (dla backtestów i rekalibracji)
@@ -270,6 +326,7 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
       pred.n_samples,
       pred.inference_ms
     );
+    const edgeId = Number(insertResult.lastInsertRowid);
 
     // 7. Log (pokaż raw → calibrated + double confirmation)
     const evPct    = (ev * 100).toFixed(1);
@@ -287,6 +344,32 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
       `EV ${evPct}% | K ${kellyPct}% | ` +
       `${pred.inference_ms}ms [${priceTag}]${agreeTag}`
     );
+
+    // 8. Execute trade — tylko gdy jesteśmy w oknie wejścia i mamy prawdziwą cenę Poly
+    if (inWindow && polyPrice && ev > 0) {
+      const signal: EdgeSignal = {
+        market:     market.name,
+        direction:  pred.direction,
+        confidence: calConf,
+        yes_price:  yesPrice,
+        ev,
+        kelly,
+        yesToken:   polyPrice.yesToken,
+        noToken:    polyPrice.noToken,
+      };
+      execute(signal).then(result => {
+        if (result.status === "dry-run" || result.status === "executed") {
+          markTraded.run(
+            result.status === "dry-run" ? 1 : 0,
+            result.sizeUsd,
+            result.orderId ?? null,
+            edgeId
+          );
+        }
+      }).catch((err: unknown) =>
+        console.error(`  ❌ Trader: ${err instanceof Error ? err.message : String(err)}`)
+      );
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`  ❌ ${market.name}: ${msg}`);
@@ -359,14 +442,22 @@ async function runScanCycle(): Promise<void> {
   await resolveOldEdges();
 
   for (const market of CONFIG.markets) {
+    if (!market.active) {
+      console.log(`  ⏸️  ${market.name.split(" ")[0]} ${market.horizonMin}M: paused`);
+      continue;
+    }
     await scanMarket(market);
   }
 
   // Summary
+  SESSION.cycles++;
   const totalEdges = (
     db.prepare("SELECT COUNT(*) as count FROM edges").get() as { count: number }
   ).count;
-  console.log(`━━━ ${CONFIG.markets.length} markets scanned | ${totalEdges} total edges in DB ━━━`);
+  const dcWr = SESSION.dcTotal > 0
+    ? ` | DC ${SESSION.dcAgree}✅ ${SESSION.dcConflict}❌ (${((SESSION.dcAgree / SESSION.dcTotal) * 100).toFixed(0)}% WR)`
+    : "";
+  console.log(`━━━ ${CONFIG.markets.length} markets | ${totalEdges} edges | cycle #${SESSION.cycles}${dcWr} ━━━`);
 }
 
 async function main(): Promise<void> {
@@ -376,11 +467,13 @@ async function main(): Promise<void> {
 ║         Polymarket Research Terminal              ║
 ╚══════════════════════════════════════════════════╝
 `);
+  const dryRun = process.env.DRY_RUN !== "false";
   console.log(`📂 Database: ${CONFIG.dbPath}`);
   console.log(`🔗 Sidecar:  ${CONFIG.sidecarUrl}`);
   console.log(`📊 Markets:  ${CONFIG.markets.length}`);
   console.log(`⏱️  Interval: ${CONFIG.scanIntervalMs / 1000}s`);
-  console.log(`🎯 Samples:  ${CONFIG.nSamples}\n`);
+  console.log(`🎯 Samples:  ${CONFIG.nSamples}`);
+  console.log(`💰 Trader:   ${dryRun ? "🧪 DRY RUN (brak prawdziwych zleceń)" : "🔴 LIVE — prawdziwe USDC!"}\n`);
 
   // Wait for sidecar
   let sidecarReady = false;
@@ -423,10 +516,10 @@ async function main(): Promise<void> {
     setInterval(runScanCycle, CONFIG.scanIntervalMs);
   } else {
     // Poczekaj na następną granicę 5-minutową (z 2s zapasem przed granicą)
-    const waitSec = Math.round((msUntilNext - 2000) / 1000);
+    const waitSec = Math.round(msUntilNext / 1000);
     console.log(`\n⏰ Synchronizacja z zegarem Polymarket...`);
     console.log(`   Następne okno za: ${waitSec}s — startujemy zsynchronizowani ✅`);
-    await new Promise((r) => setTimeout(r, msUntilNext - 2000));
+    await new Promise((r) => setTimeout(r, msUntilNext));
     await runScanCycle();
     setInterval(runScanCycle, CONFIG.scanIntervalMs);
   }
