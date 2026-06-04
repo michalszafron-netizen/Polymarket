@@ -110,7 +110,7 @@ async function submitOrder(
     makerAmount,
     takerAmount,
     side:          0,           // BUY = 0
-    signatureType: 2,           // POLY_PROXY
+    signatureType: 1,           // POLY_PROXY (V2: was 2 in old system)
     timestamp:     orderTs,
     metadata:      ZERO_BYTES32,
     builder:       ZERO_BYTES32,
@@ -138,7 +138,7 @@ async function submitOrder(
       makerAmount,
       takerAmount,
       side:          "BUY",
-      signatureType: 2,
+      signatureType: 1,           // POLY_PROXY (V2)
       expiration:    "0",
       timestamp:     orderTs,
       metadata:      ZERO_BYTES32,
