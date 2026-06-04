@@ -122,7 +122,7 @@ async function submitOrder(
 
   const domain = {
     name:              "Polymarket CTF Exchange",
-    version:           "2",
+    version:           "1",
     chainId:           137,
     verifyingContract: EXCHANGE_V2,
   };
