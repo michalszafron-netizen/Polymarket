@@ -7,6 +7,7 @@ import { TradeLedger } from "@/components/TradeLedger";
 import { StatsBar } from "@/components/StatsBar";
 import { MarketYield } from "@/components/MarketYield";
 import { LagMonitor } from "@/components/LagMonitor";
+import { TradeMonitor } from "@/components/TradeMonitor";
 
 const MARKETS = [
   "BTC 5-Min Up/Down",
@@ -47,6 +48,12 @@ interface SystemStatus {
   database: { ok: boolean };
 }
 
+interface ServerStatus {
+  online: boolean;
+  mode?: string;
+  model_ready?: boolean;
+}
+
 function StatusDot({ ok }: { ok: boolean }) {
   return (
     <span style={{
@@ -62,6 +69,7 @@ function StatusDot({ ok }: { ok: boolean }) {
 export default function Home() {
   const [stats, setStats]             = useState<StatsData | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [pnlAll, setPnlAll]           = useState<{trades:number;wins:number;losses:number;winRate:number;pnl:number;roi:number;bankroll:number} | null>(null);
   const [selectedMarket, setSelectedMarket] = useState(MARKETS[0]);
   const [clock, setClock] = useState("");
@@ -80,6 +88,13 @@ export default function Home() {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchServerStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/server-status");
+      if (res.ok) setServerStatus(await res.json());
+    } catch { setServerStatus({ online: false }); }
+  }, []);
+
   const fetchPnl = useCallback(async () => {
     try {
       const res = await fetch("/api/pnl");
@@ -94,11 +109,13 @@ export default function Home() {
     fetchStats();
     fetchStatus();
     fetchPnl();
+    fetchServerStatus();
     const s1 = setInterval(fetchStats, 30_000);
     const s2 = setInterval(fetchStatus, 15_000);
     const s3 = setInterval(fetchPnl, 30_000);
-    return () => { clearInterval(s1); clearInterval(s2); clearInterval(s3); };
-  }, [fetchStats, fetchStatus, fetchPnl]);
+    const s4 = setInterval(fetchServerStatus, 20_000);
+    return () => { clearInterval(s1); clearInterval(s2); clearInterval(s3); clearInterval(s4); };
+  }, [fetchStats, fetchStatus, fetchPnl, fetchServerStatus]);
 
   const [nextResolve, setNextResolve] = useState("--:--");
 
@@ -202,6 +219,20 @@ export default function Home() {
                 {systemStatus?.database.ok
                   ? `${systemStatus.scanner.totalEdges} sygnałów`
                   : '● BŁĄD'}
+              </span>
+            </div>
+
+            {/* SERVER (POLIS) */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, paddingTop: 8, borderTop: '1px solid var(--line)' }}>
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <StatusDot ok={serverStatus?.online ?? false} />
+                <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', letterSpacing: '.1em' }}>POLIS (LIVE)</span>
+              </div>
+              <span className="mono" style={{
+                fontSize: 12, fontWeight: 600,
+                color: serverStatus?.online ? 'var(--green)' : 'var(--hot)',
+              }}>
+                {serverStatus === null ? '...' : serverStatus.online ? '● ONLINE' : '● OFFLINE'}
               </span>
             </div>
 
@@ -478,6 +509,11 @@ export default function Home() {
           {/* Market Yield */}
           <MarketYield stats={stats} />
         </div>
+      </div>
+
+      {/* ═══ TRADE MONITOR ═══ */}
+      <div style={{ padding: "0 16px" }}>
+        <TradeMonitor />
       </div>
 
       {/* ═══ FOOTER ═══ */}

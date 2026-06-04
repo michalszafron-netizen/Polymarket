@@ -1,6 +1,6 @@
 # KRONOS TERMINAL — Dokumentacja Systemu
 
-> Wersja: 2.0 | Data: 2026-05-10 | Status: Live (Research Mode)
+> Wersja: 3.0 | Data: 2026-05-12 | Status: Live (Research Mode)
 
 ---
 
@@ -217,42 +217,57 @@ yes_price BETWEEN 0.10 AND 0.90
 
 ---
 
-## 7. Wyniki po 48h danych (2026-04-26 → 2026-05-10)
+## 7. Wyniki po 16 dniach danych (2026-04-26 → 2026-05-12)
 
 ### Stan bazy
 
 | Tabela | Liczba rekordów |
 |---|---|
-| edges | 5752 total, 5744 resolved |
-| lag_log | 132736 próbek |
-| Poprawne edges | 2864 (49.9%) |
+| edges | 8120 total, 8108 resolved |
+| lag_log | 228,544 próbek |
+| Poprawne edges | 4078 (50.3% overall) |
 
-### Chronos AI — surowa trafność
+### Backtest per rynek ($1/trade, tylko POLY live, filtr ceny 0.10-0.90)
 
-Chronos samodzielnie ma **49.9% WR** = random. To potwierdza, że zero-shot Chronos na danych krypto nie ma przewagi nad rzutem monetą.
+| Rynek | Trades | WR | PNL | DD |
+|---|---|---|---|---|
+| **BTC 15M** (z filtrem godzin) | **138** | **60.1%** | **+$38.79** | **3.9%** |
+| ETH 15M | 166 | 51.2% | +$14.47 | 7.8% |
+| BTC 5M | 424 | 49.3% | +$12.85 | 13.4% |
+| ETH 5M | 438 | 47.3% | +$1.40 | 24.3% |
+| **ŁĄCZNIE** | 1188 | 49.7% | **+$51.34** | 18.5% |
 
-### Double Confirmation — przełom
+### Efekt godzinowy — BTC 15M
 
-Korelacja sygnałów Chronos vs Lag Monitor (19-16-553 trades):
+Analiza 160 trades wykazała systematyczny wzorzec per godzina UTC:
+
+- **Silne**: 00-05h, 09h, 12h, 16h, 19-22h UTC → WR 57-80%
+- **Słabe**: 10-11h, 15h, 18h UTC → WR 0-40% (US market open + close)
+
+**Filtr**: skip 10h, 11h, 15h, 18h UTC → N: 160→138 (-14%), WR: 55.6%→**60.1%**, DD: 5.6%→**3.9%**
+
+### Double Confirmation — rewizja
+
+Na 85 zgodnych tradach (vs poprzednio 19):
 
 | Sytuacja | Trades | Win Rate |
 |---|---|---|
-| **Zgodne** (Chronos + Lag) | **19** | **68.4%** ✅ |
-| Sprzeczne | 16 | 25.0% |
-| Brak sygnału lag | 553 | 48.1% |
+| DC AGREE (Chronos+Lag zgodne) | 85 | **45.9%** ❌ |
+| DC CONFLICT (sprzeczne) | 98 | 38.8% |
+| DC NONE (brak sygnału lag) | **1005** | **51.0%** ✅ |
 
-**Wniosek**: Gdy Chronos i Lag Monitor są zgodne → 68.4% WR. Rekomendacja: wchodź TYLKO gdy oba sygnały zgodne.
+**Wniosek**: DC z próbki 19 trades (68.4%) był statystycznym szumem. Na 85 trades DC AGREE daje gorsze wyniki niż brak sygnału. DC **nie działa** jako filtr — obecność sygnału lag koreluje z wyższą zmiennością, nie z lepszą predykcją. Strategia DC porzucona.
 
-### Platt Scaling — kalibracja confidence
+### Platt Scaling v3 — kalibracja confidence (8x więcej danych)
 
-| Rynek | N | Brier przed | Brier po | Poprawa |
-|---|---|---|---|---|
-| BTC 5M | 199 | 0.4485 | 0.2493 | ✅ +0.1992 |
-| ETH 5M | 211 | 0.4452 | 0.2470 | ✅ +0.1982 |
-| BTC 15M | 87 | 0.4175 | 0.2471 | ✅ +0.1704 |
-| ETH 15M | 91 | 0.4439 | 0.2485 | ✅ +0.1954 |
+| Rynek | N | A | B | Brier przed | Brier po |
+|---|---|---|---|---|---|
+| BTC 5M | 424 | -0.1231 | 0.0845 | 0.4335 | 0.2499 ✅ |
+| ETH 5M | 438 | -1.8713 | 1.5900 | 0.4483 | 0.2482 ✅ |
+| BTC 15M | 160 | 0.7311 | -0.4302 | 0.3680 | 0.2466 ✅ |
+| ETH 15M | 166 | 1.6770 | -1.4257 | 0.3856 | 0.2485 ✅ |
 
-Brier Score ~0.25 = dobrze skalibrowany (0.25 = idealna kalibracja).
+Brier Score ~0.25 = dobrze skalibrowany. Uwaga: ETH 5M ma A=-1.87 (ujemne) — wyższy raw confidence Chronosa oznacza NIŻSZE kalibrowane p-stwo. Chronos myli się systematycznie na ETH 5M.
 
 ---
 
@@ -260,13 +275,13 @@ Brier Score ~0.25 = dobrze skalibrowany (0.25 = idealna kalibracja).
 
 ### Krytyczne
 - **Brak egzekucji** — system nie składa zleceń, wszystko manualne
-- **Brak zarządzania ryzykiem** — Kelly criterion wymaga kalibracji
 - **Chronos nie był fine-tunowany** na krypto ani Polymarket — zero-shot
-- **Chronos ma 49.9% WR = random** bez Double Confirmation
+- **Chronos solo = 50% WR** — edge pochodzi tylko z payout asymetrii (2.13x)
 - **CPU inference** — 1.3s/predykcja, przy GPU byłoby 50ms
 
 ### Istotne
-- **Double Confirmation bazuje na małej próbce** — tylko 19 zgodnych trades
+- **Double Confirmation nie działa** (45.9% WR na 85 trades — gorzej niż random)
+- **Filtr godzinowy BTC 15M** opiera się na małej próbce (4-10 trades/godzinę)
 - **Lag Monitor wymaga ciągłego Binance WS** — ryzyko rozłączenia
 - **Brak Chainlink oracle** — rozwiązujemy edges po cenie Bybit, Polymarket używa Chainlink (drobne rozbieżności)
 - **Brak spread/slippage** — backtest zakłada idealne wejście po mid-price
@@ -286,7 +301,7 @@ Brier Score ~0.25 = dobrze skalibrowany (0.25 = idealna kalibracja).
 - **Prawdziwe ceny Polymarket** — CLOB midpoint zamiast symulowanych 0.51
 - **Synchronizacja czasowa** — scanner startuje 2s przed otwarciem okna
 - **Filtr okna** — odrzuca sygnały z połowy/końca okna (zatruty pricing)
-- **Double Confirmation** — 68.4% WR gdy Chronos + Lag zgodne
+- **Filtr godzinowy BTC 15M** — skip dead zones 10/11/15/18h UTC → 60.1% WR
 - **Lag Monitor z kalibracją v2** — R² > 0.68, threshold 17.4pp
 - **Platt scaling** — Brier Score 0.25 (dobrze skalibrowany)
 - **Persystentna baza** — SQLite WAL, dane nie giną przy restarcie
@@ -366,13 +381,11 @@ Po 1 tyg: ~2000 POLY trades → można wyciągać wnioski
 
 ### Co testować
 
-1. **Trafność per rynek** — który rynek ma prawdziwy edge? (ETH 5M wygląda najlepiej)
-2. **Trafność per bucket confidence** — czy wyższy confidence = wyższa trafność?
-3. **Kalibracja Chronosa** — `python research/calibration.py`
-4. **Porównanie rano vs wieczór** — czy w różnych godzinach edge się zmienia?
-5. **BTC vs ETH** — który token jest lepiej przewidywalny?
-6. **5-Min vs 15-Min** — który horyzont lepiej trafia?
-7. **Double Confirmation** — czy 68.4% WR utrzymuje się na większej próbce?
+1. **BTC 15M filtr godzinowy** — czy 60.1% WR utrzyma się po kolejnych 2 dniach?
+2. **ETH 5M** — czy to porzucić czy szukać godzin gdzie działa?
+3. **Trafność per bucket confidence** — czy wyższy calibrated confidence = wyższa trafność?
+4. **Kelly sizing** — czy Kelly $1-5/trade daje lepszy Sharpe niż flat $1?
+5. **Lag Monitor** — zbadaj dlaczego obecność sygnału lag koreluje z gorszymi wynikami
 
 ---
 
@@ -467,8 +480,17 @@ C:\Users\markowyy\Documents\Polymarket\
 | 2026-05-10 | 48h danych: Chronos = 49.9% WR (random) | Potwierdzenie overconfidence |
 | 2026-05-10 | Kalibracja Lag Monitora v2 | sensitivity 598/553/331/286, threshold 17.4pp |
 | 2026-05-10 | Platt Scaling v2 (nowe dane) | Brier Score 0.44→0.25 |
-| 2026-05-10 | Korelacja sygnałów: Double Confirmation | 68.4% WR (19 trades) |
+| 2026-05-10 | Korelacja sygnałów: Double Confirmation | 68.4% WR (19 trades — zbyt mała próbka) |
 | 2026-05-10 | Wdrożenie Double Confirmation w kodzie | 🟢DC/🔴DC w logu bota |
+| 2026-05-12 | Analiza 1188 trades + DC rewizja | DC nie działa (45.9% WR na 85 trades) |
+| 2026-05-12 | Efekt godzinowy BTC 15M | skip 10/11/15/18h UTC → WR 55.6%→60.1% |
+| 2026-05-12 | Platt Scaling v3 (10x więcej danych) | BTC5M A=-0.12, ETH5M A=-1.87 (reverse bias!) |
+| 2026-05-12 | Filtr godzinowy v1 wdrożony w bot.ts | skipHoursUtc: [10,11,15,18] dla BTC 15M |
+| 2026-05-17 | Raport tygodniowy: 1328 trades, +$83.86 total | OOS BTC 15M: 30% WR (n=20) — Faza 1 FAIL |
+| 2026-05-17 | Filtr godzinowy v2 dla BTC 15M | skip [6,7,8,10,11,15,18] → WR 58.5%, DD 6.1% |
+| 2026-05-23 | Analiza 1467 trades: near-even (0.45-0.55) ma -6% EV | ETH 5M OOS=55.6% jedyna zdająca Fazę 1 |
+| 2026-05-23 | Filtr bet_price < 0.45 dodany do bot.ts | $86→$173 symulacja, DD 18.5%→6.4% |
+| 2026-05-23 | ETH 15M wyłączony (active:false) | OOS 38.3%, rolling 36% — poniżej break-even |
 
 ---
 

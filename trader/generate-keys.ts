@@ -29,7 +29,7 @@ async function generateKeys() {
   try {
     // Dynamiczny import — biblioteka musi być zainstalowana
     const { ClobClient } = await import("@polymarket/clob-client");
-    const { Wallet }     = await import("ethers");
+    const { Wallet }     = await import("@ethersproject/wallet");
 
     const wallet = new Wallet(privateKey);
     console.log(`📍 Adres portfela: ${wallet.address}`);
@@ -43,7 +43,7 @@ async function generateKeys() {
     const apiCreds = await client.createApiKey();
 
     console.log("\n✅ Klucze wygenerowane! Wklej do .env:\n");
-    console.log(`POLY_API_KEY=${apiCreds.apiKey}`);
+    console.log(`POLY_API_KEY=${apiCreds.key}`);
     console.log(`POLY_API_SECRET=${apiCreds.secret}`);
     console.log(`POLY_API_PASSPHRASE=${apiCreds.passphrase}`);
     console.log("\n⚠️  Zapisz te klucze — nie można ich odzyskać!");

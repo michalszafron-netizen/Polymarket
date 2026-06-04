@@ -16,8 +16,8 @@ const SLUG_PREFIX: Record<string, { prefix: string; intervalMin: number }> = {
   "ETH 15-Min Up/Down": { prefix: "eth-updown-15m", intervalMin: 15 },
 };
 
-// Cache: marketName → { tokenId, expiresAt }
-const cache = new Map<string, { tokenId: string; expiresAt: number }>();
+// Cache: marketName → { tokenIds: [yes, no], expiresAt }
+const cache = new Map<string, { tokenIds: [string, string]; expiresAt: number }>();
 
 // ─── Oblicz aktualny slot czasowy ──────────────────────────────────────────
 
@@ -25,13 +25,13 @@ function currentSlots(intervalMin: number): number[] {
   const intervalSec = intervalMin * 60;
   const now = Math.floor(Date.now() / 1000);
   const current = Math.floor(now / intervalSec) * intervalSec;
-  // Zwróć aktualny + poprzedni slot (rynek może być jeszcze aktywny)
-  return [current, current - intervalSec, current + intervalSec];
+  // Tylko aktualny i następny slot — poprzedni jest rozliczany (cena ~0.001 lub ~0.999)
+  return [current, current + intervalSec];
 }
 
 // ─── Pobierz token ID przez slug ────────────────────────────────────────────
 
-async function fetchTokenBySlug(slug: string): Promise<string | null> {
+async function fetchTokensBySlug(slug: string): Promise<[string, string] | null> {
   try {
     const res = await fetch(`${GAMMA}/events?slug=${slug}`, {
       signal: AbortSignal.timeout(4000),
@@ -46,7 +46,8 @@ async function fetchTokenBySlug(slug: string): Promise<string | null> {
     if (!market?.clobTokenIds) return null;
 
     const ids = parseTokenIds(market.clobTokenIds);
-    return ids[0] ?? null; // [0] = YES token
+    if (ids.length < 2) return null;
+    return [ids[0], ids[1]]; // [0] = YES, [1] = NO
   } catch {
     return null;
   }
@@ -67,7 +68,8 @@ async function fetchMidpoint(tokenId: string): Promise<number | null> {
     if (!res.ok) return null;
     const data = await res.json() as { mid?: string };
     const mid = parseFloat(data.mid ?? "");
-    return isNaN(mid) || mid <= 0 || mid >= 1 ? null : mid;
+    // Odrzuć ceny ekstremalne — rozliczony rynek ma cenę ~0.001 lub ~0.999
+    return isNaN(mid) || mid < 0.05 || mid > 0.95 ? null : mid;
   } catch {
     return null;
   }
@@ -75,22 +77,19 @@ async function fetchMidpoint(tokenId: string): Promise<number | null> {
 
 // ─── Znajdź aktualny token ID dla rynku ────────────────────────────────────
 
-async function findTokenId(marketName: string): Promise<string | null> {
-  // Sprawdź cache
+async function findTokenIds(marketName: string): Promise<[string, string] | null> {
   const hit = cache.get(marketName);
-  if (hit && hit.expiresAt > Date.now()) return hit.tokenId;
+  if (hit && hit.expiresAt > Date.now()) return hit.tokenIds;
 
   const cfg = SLUG_PREFIX[marketName];
   if (!cfg) return null;
 
-  // Próbuj kolejne sloty (aktualny, poprzedni, następny)
   for (const slot of currentSlots(cfg.intervalMin)) {
-    const slug    = `${cfg.prefix}-${slot}`;
-    const tokenId = await fetchTokenBySlug(slug);
-    if (tokenId) {
-      // Cache na 4 minuty
-      cache.set(marketName, { tokenId, expiresAt: Date.now() + 4 * 60 * 1000 });
-      return tokenId;
+    const slug   = `${cfg.prefix}-${slot}`;
+    const tokens = await fetchTokensBySlug(slug);
+    if (tokens) {
+      cache.set(marketName, { tokenIds: tokens, expiresAt: Date.now() + 4 * 60 * 1000 });
+      return tokens;
     }
   }
 
@@ -100,16 +99,27 @@ async function findTokenId(marketName: string): Promise<string | null> {
 // ─── Publiczny interfejs ────────────────────────────────────────────────────
 
 export interface PolyPrice {
-  yes:    number;
+  yes:       number;
+  yesToken:  string;
+  noToken:   string;
   source: "polymarket" | "simulated";
 }
 
 export async function getPolyPrice(marketName: string): Promise<PolyPrice | null> {
-  const tokenId = await findTokenId(marketName);
-  if (!tokenId) return null;
+  const tokens = await findTokenIds(marketName);
+  if (!tokens) return null;
 
-  const mid = await fetchMidpoint(tokenId);
-  if (mid === null) return null;
+  let mid = await fetchMidpoint(tokens[0]);
 
-  return { yes: mid, source: "polymarket" };
+  // Cena null = stary/rozliczony rynek w cache — inwaliduj i spróbuj ponownie
+  if (mid === null) {
+    cache.delete(marketName);
+    const fresh = await findTokenIds(marketName);
+    if (!fresh) return null;
+    mid = await fetchMidpoint(fresh[0]);
+    if (mid === null) return null;
+    return { yes: mid, yesToken: fresh[0], noToken: fresh[1], source: "polymarket" };
+  }
+
+  return { yes: mid, yesToken: tokens[0], noToken: tokens[1], source: "polymarket" };
 }

@@ -6,12 +6,12 @@
     "esModuleInterop": true,
     "strict": true,
     "outDir": "dist",
-    "rootDir": ".",
+    "rootDir": "..",
     "resolveJsonModule": true,
     "declaration": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["*.ts"],
+  "include": ["*.ts", "../trader/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
