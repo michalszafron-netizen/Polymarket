@@ -66,7 +66,7 @@ async function submitOrder(
     await import("@polymarket/clob-client-v2");
 
   const account    = privateKeyToAccount(CFG.privateKey as `0x${string}`);
-  const walletClient = createWalletClient({ account, transport: http() });
+  const walletClient = createWalletClient({ account, transport: http("https://polygon-rpc.com") });
 
   const client = new ClobClient({
     host:            CFG.clobApiUrl,
