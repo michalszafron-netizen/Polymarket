@@ -49,6 +49,13 @@ const WALLET_EXECUTE_ABI = [
     outputs: [],
     stateMutability: "nonpayable",
   },
+  { name: "InvalidSignature", type: "error", inputs: [] },
+  { name: "InvalidNonce",     type: "error", inputs: [] },
+  { name: "InvalidWallet",    type: "error", inputs: [] },
+  { name: "OnlyFactory",      type: "error", inputs: [] },
+  { name: "Expired",          type: "error", inputs: [] },
+  { name: "Unauthorized",     type: "error", inputs: [] },
+  { name: "CallFailed",       type: "error", inputs: [{ name: "index", type: "uint256" }] },
 ] as const;
 
 // DepositWallet (proxy) — nonce() do podpisywania batchy
@@ -226,31 +233,30 @@ export async function runRedeemer(): Promise<void> {
     calls,
   };
 
-  // Pobierz domenę EIP-712 z kontraktu — zawiera salt unikalny dla każdego wallet
-  // viem zwraca named object; NIE używaj destrukturyzacji tablicy
+  // Pobierz domenę EIP-712 z kontraktu — zawiera salt unikalny dla każdego wallet.
+  // viem zwraca TUPLE (array), nie named object — używamy dostępu po indeksie.
+  // [0]=fields [1]=name [2]=version [3]=chainId [4]=verifyingContract [5]=salt [6]=extensions
   const domainRaw = await publicClient.readContract({
     address:      CFG.proxyWallet as `0x${string}`,
     abi:          EIP5267_ABI,
     functionName: "eip712Domain",
-  }) as {
-    fields:            `0x${string}`;
-    name:              string;
-    version:           string;
-    chainId:           bigint;
-    verifyingContract: `0x${string}`;
-    salt:              `0x${string}`;
-    extensions:        bigint[];
-  };
+  }) as unknown as readonly [`0x${string}`, string, string, bigint, `0x${string}`, `0x${string}`, bigint[]];
 
-  console.log(`     [REDEEMER] domain salt=${domainRaw.salt}`);
+  const eipName     = domainRaw[1];
+  const eipVersion  = domainRaw[2];
+  const eipChainId  = domainRaw[3];
+  const eipContract = domainRaw[4];
+  const eipSalt     = domainRaw[5];
+
+  console.log(`     [REDEEMER] domain name=${eipName} version=${eipVersion} chainId=${eipChainId} salt=${eipSalt}`);
 
   const signature = await walletClient.signTypedData({
     domain: {
-      name:              domainRaw.name,
-      version:           domainRaw.version,
-      chainId:           domainRaw.chainId,
-      verifyingContract: domainRaw.verifyingContract,
-      salt:              domainRaw.salt,
+      name:              eipName,
+      version:           eipVersion,
+      chainId:           eipChainId,
+      verifyingContract: eipContract,
+      salt:              eipSalt,
     },
     types:       EIP712_TYPES,
     primaryType: "Batch",
