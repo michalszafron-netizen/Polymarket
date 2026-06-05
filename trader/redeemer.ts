@@ -83,16 +83,18 @@ export async function runRedeemer(): Promise<void> {
     return;
   }
 
-  const { createWalletClient, http } = await import("viem");
+  const { createPublicClient, createWalletClient, http } = await import("viem");
   const { privateKeyToAccount } = await import("viem/accounts");
   const { polygon } = await import("viem/chains");
 
+  const RPC = "https://polygon-bor-rpc.publicnode.com";
   const account = privateKeyToAccount(CFG.privateKey as `0x${string}`);
-  const walletClient = createWalletClient({
-    account,
-    chain: polygon,
-    transport: http("https://rpc.ankr.com/polygon"),
-  });
+
+  const publicClient = createPublicClient({ chain: polygon, transport: http(RPC) });
+  const walletClient = createWalletClient({ account, chain: polygon, transport: http(RPC) });
+
+  // Pobieramy nonce ręcznie z "latest" — "pending" nie jest wspierany przez część RPC
+  let nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "latest" });
 
   let redeemed = 0;
   for (const pos of positions) {
@@ -107,6 +109,7 @@ export async function runRedeemer(): Promise<void> {
         abi: CTF_ABI,
         functionName: "redeemPositions",
         args: [COLLATERAL, ZERO_BYTES32, pos.conditionId as `0x${string}`, [indexSet]],
+        nonce: nonce++,
       });
 
       console.log(`     ✅ tx: ${hash}`);
