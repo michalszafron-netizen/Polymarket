@@ -16,7 +16,7 @@ import { getPolyPrice } from "./polymarket.js";
 import { startBinanceFeed, isFeedHealthy } from "./binance-ws.js";
 import { startLagMonitor, getLatestLagSignal } from "./lag-monitor.js";
 import { execute, type EdgeSignal } from "../trader/trader.js";
-import { runRedeemer } from "../trader/redeemer.js";
+// import { runRedeemer } from "../trader/redeemer.js"; // wyłączony — Polymarket ma natywny auto-redeem
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -435,7 +435,7 @@ async function resolveOldEdges(): Promise<void> {
   }
 }
 
-let redeemerRunning = false;
+// let redeemerRunning = false;
 
 async function runScanCycle(): Promise<void> {
   const ts = new Date().toISOString().slice(0, 19);
@@ -462,13 +462,13 @@ async function runScanCycle(): Promise<void> {
     : "";
   console.log(`━━━ ${CONFIG.markets.length} markets | ${totalEdges} edges | cycle #${SESSION.cycles}${dcWr} ━━━`);
 
-  // Auto-redeem co 6 cykli (30 min) — nie blokuje następnego scanu
-  if (SESSION.cycles % 6 === 1 && !redeemerRunning) {
-    redeemerRunning = true;
-    runRedeemer()
-      .catch(e => console.error("[REDEEMER]", e instanceof Error ? e.message : e))
-      .finally(() => { redeemerRunning = false; });
-  }
+  // Auto-redeem wyłączony — Polymarket ma teraz natywny auto-redeem (włącz w UI)
+  // if (SESSION.cycles % 6 === 1 && !redeemerRunning) {
+  //   redeemerRunning = true;
+  //   runRedeemer()
+  //     .catch(e => console.error("[REDEEMER]", e instanceof Error ? e.message : e))
+  //     .finally(() => { redeemerRunning = false; });
+  // }
 }
 
 async function main(): Promise<void> {
