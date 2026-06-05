@@ -1,13 +1,13 @@
 /**
  * KRONOS REDEEMER — Auto-odkup wygranych pozycji Polymarket
  *
- * Prawidłowy mechanizm V2:
+ * Prawidłowy mechanizm V3:
  *   EOA podpisuje Batch (EIP-712, verifyingContract = depositWallet)
- *   → DepositWalletFactory.proxy() → DepositWallet
+ *   → DepositWallet.execute(batch, sig) — wywoływane bezpośrednio przez właściciela EOA
  *   → CtfCollateralAdapter.redeemPositions() → pUSD wraca do portfela
  *
- * Poprzednia wersja błędnie wywoływała CTF.redeemPositions() bezpośrednio
- * z EOA — CTF nie ma pozycji EOA, tylko depositWallet.
+ * V2 błędnie wywoływało DepositWalletFactory.proxy() — ten ma modifier onlyOperator,
+ * EOA nie jest operatorem → revert 0x27e1f1e5.
  */
 
 import { TRADER_CONFIG as CFG } from "./config.js";
@@ -16,20 +16,20 @@ const DATA_API = "https://data-api.polymarket.com";
 
 // ── Kontrakty Polymarket V2 na Polygon ──────────────────────────────────────
 
-const FACTORY_ADDRESS = "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07" as const;
 const CTF_ADAPTER     = "0xAdA100Db00Ca00073811820692005400218FcE1f" as const;
 const PUSD            = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB" as const;
 const ZERO_BYTES32    = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 const RPC             = "https://polygon-bor-rpc.publicnode.com";
 
-// DepositWalletFactory — proxy(Batch[], bytes[]) + nonce na deposit wallet
-const FACTORY_ABI = [
+// DepositWallet — execute(Batch, bytes) callable by owner EOA directly
+// (DepositWalletFactory.proxy() jest onlyOperator — EOA nie może go wywołać)
+const WALLET_EXECUTE_ABI = [
   {
-    name: "proxy",
+    name: "execute",
     type: "function",
     inputs: [
       {
-        name: "_batches", type: "tuple[]",
+        name: "_batch", type: "tuple",
         components: [
           { name: "wallet",   type: "address" },
           { name: "nonce",    type: "uint256" },
@@ -44,7 +44,7 @@ const FACTORY_ABI = [
           },
         ],
       },
-      { name: "_signatures", type: "bytes[]" },
+      { name: "_signature", type: "bytes" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -231,10 +231,10 @@ export async function runRedeemer(): Promise<void> {
 
   try {
     const hash = await walletClient.writeContract({
-      address:      FACTORY_ADDRESS,
-      abi:          FACTORY_ABI,
-      functionName: "proxy",
-      args:         [[batchMessage], [signature]],
+      address:      CFG.proxyWallet as `0x${string}`,
+      abi:          WALLET_EXECUTE_ABI,
+      functionName: "execute",
+      args:         [batchMessage, signature],
       nonce:        txNonce,
     });
 
