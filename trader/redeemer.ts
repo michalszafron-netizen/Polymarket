@@ -91,7 +91,7 @@ export async function runRedeemer(): Promise<void> {
   const walletClient = createWalletClient({
     account,
     chain: polygon,
-    transport: http("https://polygon-rpc.com"),
+    transport: http("https://rpc.ankr.com/polygon"),
   });
 
   let redeemed = 0;
