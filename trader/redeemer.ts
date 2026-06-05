@@ -78,6 +78,25 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
+// EIP-5267: eip712Domain() — zwraca salt unikalny dla każdego wallet
+const EIP5267_ABI = [
+  {
+    name: "eip712Domain",
+    type: "function",
+    inputs: [],
+    outputs: [
+      { name: "fields",            type: "bytes1"    },
+      { name: "name",              type: "string"    },
+      { name: "version",           type: "string"    },
+      { name: "chainId",           type: "uint256"   },
+      { name: "verifyingContract", type: "address"   },
+      { name: "salt",              type: "bytes32"   },
+      { name: "extensions",        type: "uint256[]" },
+    ],
+    stateMutability: "view",
+  },
+] as const;
+
 // EIP-712 typy dla batcha proxy wallet
 const EIP712_TYPES = {
   Batch: [
@@ -207,14 +226,31 @@ export async function runRedeemer(): Promise<void> {
     calls,
   };
 
-  // Podpisz Batch EIP-712 — domena potwierdzona z @polymarket/builder-relayer-client
-  // DEPOSIT_WALLET_DOMAIN_NAME="DepositWallet", VERSION="1", verifyingContract=depositWallet
+  // Pobierz domenę EIP-712 z kontraktu — zawiera salt unikalny dla każdego wallet
+  // viem zwraca named object; NIE używaj destrukturyzacji tablicy
+  const domainRaw = await publicClient.readContract({
+    address:      CFG.proxyWallet as `0x${string}`,
+    abi:          EIP5267_ABI,
+    functionName: "eip712Domain",
+  }) as {
+    fields:            `0x${string}`;
+    name:              string;
+    version:           string;
+    chainId:           bigint;
+    verifyingContract: `0x${string}`;
+    salt:              `0x${string}`;
+    extensions:        bigint[];
+  };
+
+  console.log(`     [REDEEMER] domain salt=${domainRaw.salt}`);
+
   const signature = await walletClient.signTypedData({
     domain: {
-      name:              "DepositWallet",
-      version:           "1",
-      chainId:           137n,
-      verifyingContract: CFG.proxyWallet as `0x${string}`,
+      name:              domainRaw.name,
+      version:           domainRaw.version,
+      chainId:           domainRaw.chainId,
+      verifyingContract: domainRaw.verifyingContract,
+      salt:              domainRaw.salt,
     },
     types:       EIP712_TYPES,
     primaryType: "Batch",
