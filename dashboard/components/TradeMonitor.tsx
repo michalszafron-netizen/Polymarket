@@ -47,6 +47,22 @@ interface ServerApiResponse {
   liveStats: Stats;
 }
 
+// ts z bazy to UTC (SQLite datetime('now')) — konwertujemy na Europe/Warsaw
+function toWarsawTime(utcStr: string): string {
+  const dt = new Date(utcStr.replace(" ", "T") + "Z");
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Warsaw",
+    month:    "2-digit",
+    day:      "2-digit",
+    hour:     "2-digit",
+    minute:   "2-digit",
+    hour12:   false,
+  }).formatToParts(dt);
+  const p: Record<string, string> = {};
+  for (const x of parts) p[x.type] = x.value;
+  return `${p.day}.${p.month} ${p.hour}:${p.minute}`;
+}
+
 const MARKET_SHORT: Record<string, string> = {
   "BTC 5-Min Up/Down":  "BTC 5M",
   "ETH 5-Min Up/Down":  "ETH 5M",
@@ -265,7 +281,7 @@ export function TradeMonitor() {
                 const statusLabel  = !t.resolved ? "OPEN" : t.correct === 1 ? "WIN" : "LOSS";
                 const mkt          = MARKET_SHORT[t.market] ?? t.market;
                 const payout       = (1 / t.bet_price).toFixed(2);
-                const time         = t.ts.slice(5, 16);
+                const time         = toWarsawTime(t.ts);
 
                 return (
                   <div key={t.id} style={{

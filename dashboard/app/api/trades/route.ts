@@ -56,7 +56,9 @@ export async function GET() {
           ? (1 / betPrice - 1) * t.trade_size_usd
           : -t.trade_size_usd;
         cumPnl += pnl;
-        return { ts: t.ts.slice(5, 16), cumPnl: +cumPnl.toFixed(2) };
+        const dt = new Date(t.ts.replace(" ", "T") + "Z");
+        const label = dt.toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+        return { ts: label, cumPnl: +cumPnl.toFixed(2) };
       });
 
       // Per-market breakdown
