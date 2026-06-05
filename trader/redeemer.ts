@@ -51,13 +51,28 @@ const FACTORY_ABI = [
   },
 ] as const;
 
-// DepositWallet (proxy) — nonce() do podpisywania batchy
+// DepositWallet (proxy) — nonce() i eip712Domain() do podpisywania batchy
 const WALLET_ABI = [
   {
     name: "nonce",
     type: "function",
     inputs: [],
     outputs: [{ name: "nonce_", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    name: "eip712Domain",
+    type: "function",
+    inputs: [],
+    outputs: [
+      { name: "fields",            type: "bytes1"    },
+      { name: "name",              type: "string"    },
+      { name: "version",           type: "string"    },
+      { name: "chainId",           type: "uint256"   },
+      { name: "verifyingContract", type: "address"   },
+      { name: "salt",              type: "bytes32"   },
+      { name: "extensions",        type: "uint256[]" },
+    ],
     stateMutability: "view",
   },
 ] as const;
@@ -159,15 +174,27 @@ export async function runRedeemer(): Promise<void> {
   const publicClient = createPublicClient({ chain: polygon, transport: http(RPC) });
   const walletClient = createWalletClient({ account, chain: polygon, transport: http(RPC) });
 
-  // Pobierz nonce deposit wallet (nie nonce EOA — deposit wallet zarządza własnym nonce)
-  const walletNonce = await publicClient.readContract({
-    address:      CFG.proxyWallet as `0x${string}`,
-    abi:          WALLET_ABI,
-    functionName: "nonce",
-    args:         [],
-  });
+  // Pobierz nonce i domenę EIP-712 bezpośrednio z deposit wallet
+  const [walletNonce, domainData] = await Promise.all([
+    publicClient.readContract({
+      address:      CFG.proxyWallet as `0x${string}`,
+      abi:          WALLET_ABI,
+      functionName: "nonce",
+      args:         [],
+    }),
+    publicClient.readContract({
+      address:      CFG.proxyWallet as `0x${string}`,
+      abi:          WALLET_ABI,
+      functionName: "eip712Domain",
+      args:         [],
+    }),
+  ]);
 
-  console.log(`     [REDEEMER] depositWallet nonce=${walletNonce}`);
+  const [, domainName, domainVersion, domainChainId, domainContract] = domainData as [
+    string, string, string, bigint, string, string, bigint[]
+  ];
+
+  console.log(`     [REDEEMER] depositWallet nonce=${walletNonce}, domain="${domainName}" v${domainVersion}`);
 
   // Zakoduj każdą pozycję jako Call do CtfCollateralAdapter
   const calls = positions.map(pos => {
@@ -205,13 +232,13 @@ export async function runRedeemer(): Promise<void> {
     calls,
   };
 
-  // Podpisz Batch EIP-712 — verifyingContract = depositWallet (nie factory!)
+  // Podpisz Batch EIP-712 — domena z kontraktu deposit wallet (dynamicznie)
   const signature = await walletClient.signTypedData({
     domain: {
-      name:              "DepositWallet",
-      version:           "1",
-      chainId:           137n,
-      verifyingContract: CFG.proxyWallet as `0x${string}`,
+      name:              domainName,
+      version:           domainVersion,
+      chainId:           domainChainId,
+      verifyingContract: (domainContract || CFG.proxyWallet) as `0x${string}`,
     },
     types:       EIP712_TYPES,
     primaryType: "Batch",
