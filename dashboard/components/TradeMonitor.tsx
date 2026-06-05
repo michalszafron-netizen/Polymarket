@@ -56,11 +56,11 @@ const MARKET_SHORT: Record<string, string> = {
 
 function StatCell({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 80 }}>
-      <div style={{ fontFamily: "JetBrains Mono", fontSize: 10, color: "var(--ink-3)", letterSpacing: ".1em" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 80 }}>
+      <div style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: "var(--ink-3)", letterSpacing: ".1em" }}>
         {label}
       </div>
-      <div style={{ fontFamily: "JetBrains Mono", fontSize: 18, fontWeight: 700, color: color ?? "var(--ink)" }}>
+      <div style={{ fontFamily: "JetBrains Mono", fontSize: 26, fontWeight: 700, color: color ?? "var(--ink)" }}>
         {value}
       </div>
     </div>
@@ -186,7 +186,7 @@ export function TradeMonitor() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         {/* ─── Equity curve ───────────────────────────────────── */}
         <div>
-          <div style={{ fontFamily: "JetBrains Mono", fontSize: 11, color: "var(--ink-3)", marginBottom: 8, letterSpacing: ".08em" }}>
+          <div style={{ fontFamily: "JetBrains Mono", fontSize: 13, color: "var(--ink-3)", marginBottom: 10, letterSpacing: ".08em" }}>
             KRZYWA KAPITAŁU — {mode === "dry" ? "DRY RUN" : mode === "server" ? "POLIS LIVE" : "LIVE"}
           </div>
           {(stats?.curve?.length ?? 0) === 0 ? (
@@ -220,18 +220,18 @@ export function TradeMonitor() {
 
           {/* Per-market breakdown */}
           {stats && Object.keys(stats.markets).length > 0 && (
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
               {Object.entries(stats.markets).map(([mkt, s]) => (
                 <div key={mkt} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontFamily: "JetBrains Mono", fontSize: 11, color: "var(--ink-3)" }}>
+                  <span style={{ fontFamily: "JetBrains Mono", fontSize: 13, color: "var(--ink-3)" }}>
                     {MARKET_SHORT[mkt] ?? mkt}
                   </span>
-                  <span style={{ fontFamily: "JetBrains Mono", fontSize: 11 }}>
-                    <span style={{ color: "var(--green)" }}>{s.wins}W</span>
+                  <span style={{ fontFamily: "JetBrains Mono", fontSize: 13 }}>
+                    <span style={{ color: "var(--green)", fontWeight: 700 }}>{s.wins}W</span>
                     {" / "}
-                    <span style={{ color: "var(--hot)" }}>{s.losses}L</span>
+                    <span style={{ color: "var(--hot)", fontWeight: 700 }}>{s.losses}L</span>
                     {s.trades > 0 && (
-                      <span style={{ color: "var(--ink-3)", marginLeft: 6 }}>
+                      <span style={{ color: "var(--ink-3)", marginLeft: 8 }}>
                         ({(s.wins / s.trades * 100).toFixed(0)}%)
                       </span>
                     )}
@@ -244,7 +244,7 @@ export function TradeMonitor() {
 
         {/* ─── Trade ledger ────────────────────────────────────── */}
         <div>
-          <div style={{ fontFamily: "JetBrains Mono", fontSize: 11, color: "var(--ink-3)", marginBottom: 8, letterSpacing: ".08em" }}>
+          <div style={{ fontFamily: "JetBrains Mono", fontSize: 13, color: "var(--ink-3)", marginBottom: 10, letterSpacing: ".08em" }}>
             LOG TRADE'ÓW
           </div>
           {trades.length === 0 ? (
@@ -270,32 +270,32 @@ export function TradeMonitor() {
                 return (
                   <div key={t.id} style={{
                     display: "grid",
-                    gridTemplateColumns: "60px 56px 1fr 56px 52px",
-                    gap: 6, alignItems: "center",
-                    padding: "8px 0",
-                    borderBottom: "1px dashed rgba(255,255,255,.04)",
-                    fontSize: 11, fontFamily: "JetBrains Mono",
+                    gridTemplateColumns: "72px 68px 1fr 72px 60px",
+                    gap: 8, alignItems: "center",
+                    padding: "10px 0",
+                    borderBottom: "1px dashed rgba(255,255,255,.06)",
+                    fontSize: 13, fontFamily: "JetBrains Mono",
                   }}>
                     {/* Czas + rynek */}
                     <div>
-                      <div style={{ color: "var(--ink-3)", fontSize: 10 }}>{time}</div>
-                      <div style={{ color: "var(--ink-2)", marginTop: 2 }}>{mkt}</div>
+                      <div style={{ color: "var(--ink-3)", fontSize: 11 }}>{time}</div>
+                      <div style={{ color: "var(--ink-2)", marginTop: 3, fontSize: 13, fontWeight: 600 }}>{mkt}</div>
                     </div>
 
                     {/* Kierunek */}
-                    <div style={{ color: t.direction === "UP" ? "var(--green)" : "var(--hot)", fontWeight: 600 }}>
+                    <div style={{ color: t.direction === "UP" ? "var(--green)" : "var(--hot)", fontWeight: 700, fontSize: 13 }}>
                       {t.direction === "UP" ? "▲" : "▼"} {t.side}
                     </div>
 
                     {/* Cena + payout */}
-                    <div style={{ color: "var(--ink-2)" }}>
+                    <div style={{ color: "var(--ink-2)", fontSize: 13 }}>
                       {t.bet_price.toFixed(3)}
-                      <span style={{ color: "var(--ink-3)", marginLeft: 4 }}>{payout}x</span>
+                      <span style={{ color: "var(--ink-3)", marginLeft: 5 }}>{payout}x</span>
                     </div>
 
                     {/* P&L */}
                     <div style={{
-                      fontWeight: 600,
+                      fontWeight: 700, fontSize: 14,
                       color: t.pnl == null ? "var(--ink-3)" : t.pnl >= 0 ? "var(--green)" : "var(--hot)",
                       textAlign: "right",
                     }}>
@@ -304,9 +304,9 @@ export function TradeMonitor() {
 
                     {/* Status */}
                     <div style={{
-                      color: statusColor, fontWeight: 600, textAlign: "center",
+                      color: statusColor, fontWeight: 700, textAlign: "center",
                       border: `1px solid ${statusColor}40`, borderRadius: 999,
-                      padding: "2px 6px", fontSize: 10,
+                      padding: "3px 8px", fontSize: 12,
                     }}>
                       {statusLabel}
                     </div>
