@@ -50,12 +50,14 @@ const CFG = {
 const db = new Database(CFG.dbPath);
 db.pragma("journal_mode = WAL");
 
-// Migracja schematu — dodaj kolumny spreadu (idempotentne)
+// Migracja schematu — idempotentne dodawanie kolumn
 for (const sql of [
-  "ALTER TABLE lag_log ADD COLUMN yes_bid  REAL",
-  "ALTER TABLE lag_log ADD COLUMN yes_ask  REAL",
-  "ALTER TABLE lag_log ADD COLUMN no_bid   REAL",
-  "ALTER TABLE lag_log ADD COLUMN no_ask   REAL",
+  "ALTER TABLE lag_log ADD COLUMN funding_rate  REAL",
+  "ALTER TABLE lag_log ADD COLUMN open_interest REAL",
+  "ALTER TABLE lag_log ADD COLUMN yes_bid       REAL",
+  "ALTER TABLE lag_log ADD COLUMN yes_ask       REAL",
+  "ALTER TABLE lag_log ADD COLUMN no_bid        REAL",
+  "ALTER TABLE lag_log ADD COLUMN no_ask        REAL",
 ]) {
   try { db.exec(sql); } catch { /* kolumna już istnieje */ }
 }
