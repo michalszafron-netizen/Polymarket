@@ -106,6 +106,7 @@ export function TradeMonitor() {
   const [serverData, setServerData] = useState<ServerApiResponse | null>(null);
   const [serverError, setServerError] = useState(false);
   const [mode, setMode]             = useState<Mode>("dry");
+  const [resetting, setResetting]   = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -167,8 +168,23 @@ export function TradeMonitor() {
             </span>
           )}
         </div>
-        {/* Mode toggle */}
-        <div style={{ display: "flex", gap: 6 }}>
+        {/* Mode toggle + reset */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {mode === "dry" && (
+            <button
+              onClick={async () => {
+                if (!confirm("Wyczyścić wszystkie dry run trade'y?")) return;
+                setResetting(true);
+                await fetch("/api/reset-dry-run", { method: "POST" });
+                await load();
+                setResetting(false);
+              }}
+              className="pill"
+              style={{ cursor: "pointer", borderColor: "var(--hot)", color: "var(--hot)", opacity: resetting ? 0.5 : 1 }}
+            >
+              {resetting ? "..." : "RESET"}
+            </button>
+          )}
           {(["dry", "live", "server"] as Mode[]).map(m => (
             <button key={m} onClick={() => setMode(m)} className="pill" style={{
               cursor: "pointer",

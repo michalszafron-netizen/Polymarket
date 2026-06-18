@@ -50,16 +50,35 @@ const CFG = {
 const db = new Database(CFG.dbPath);
 db.pragma("journal_mode = WAL");
 
+// Migracja schematu — dodaj kolumny spreadu (idempotentne)
+for (const sql of [
+  "ALTER TABLE lag_log ADD COLUMN yes_bid  REAL",
+  "ALTER TABLE lag_log ADD COLUMN yes_ask  REAL",
+  "ALTER TABLE lag_log ADD COLUMN no_bid   REAL",
+  "ALTER TABLE lag_log ADD COLUMN no_ask   REAL",
+]) {
+  try { db.exec(sql); } catch { /* kolumna już istnieje */ }
+}
+
 const insertLag = db.prepare(`
   INSERT INTO lag_log (
     ts, market, symbol, interval_min, window_sec_in,
     spot_open, spot_now, spot_change_pct,
-    poly_yes, fair_yes, lag_pct, abs_lag_pct, signal
+    poly_yes, fair_yes, lag_pct, abs_lag_pct, signal,
+    yes_bid, yes_ask, no_bid, no_ask
   ) VALUES (
     datetime('now'), ?, ?, ?, ?,
     ?, ?, ?,
-    ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?
   )
+`);
+
+const insertMicro = db.prepare(`
+  UPDATE lag_log SET
+    funding_rate = ?,
+    open_interest = ?
+  WHERE id = ?
 `);
 
 // ─── Fair price model (skalibrowany) ───────────────────────────────────────
@@ -84,19 +103,21 @@ function classifySignal(lagPct: number, windowSecIn: number, windowMax: number):
 async function pollOnce(): Promise<void> {
   if (!isFeedHealthy()) return;
 
-  // Pobierz wszystkie midpointy Polymarket równolegle
+  // Pobierz ceny i booki Polymarket równolegle dla wszystkich rynków
   const polyPromises = CFG.markets.map(async m => {
     const p = await getPolyPrice(m.name);
-    return { name: m.name, polyYes: p?.yes ?? null };
+    return { name: m.name, price: p };
   });
   const polyResults = await Promise.all(polyPromises);
-  const polyMap = new Map(polyResults.map(r => [r.name, r.polyYes]));
+  // Map: market name → pełny PolyPrice (lub null)
+  const polyMap = new Map(polyResults.map(r => [r.name, r.price]));
 
   for (const m of CFG.markets) {
     const snap = getSpotSnapshot(m.symbol, m.intervalMin);
     if (!snap) continue;
 
-    const polyYes = polyMap.get(m.name) ?? null;
+    const poly    = polyMap.get(m.name) ?? null;
+    const polyYes = poly?.yes ?? null;
     const fairYes = fairYesPrice(snap.changePct, m.sensitivity, m.alpha);
 
     // Bez Polymarket — i tak loguj snapshot spot (przyda się do analiz)
@@ -110,11 +131,19 @@ async function pollOnce(): Promise<void> {
       signal = classifySignal(lagPct, snap.windowSecIn, m.windowMax);
     }
 
-    insertLag.run(
+    const res = insertLag.run(
       m.name, m.symbol, m.intervalMin, snap.windowSecIn,
       snap.openOfWindow, snap.price, snap.changePct,
-      polyYes, fairYes, lagPct, absLag, signal
+      polyYes, fairYes, lagPct, absLag, signal,
+      poly?.yesBid ?? null, poly?.yesAsk ?? null,
+      poly?.noBid  ?? null, poly?.noAsk  ?? null
     );
+
+    if (snap.fundingRate !== null) {
+        try {
+            insertMicro.run(snap.fundingRate, snap.openInterest, res.lastInsertRowid);
+        } catch { /* kolumny mogą jeszcze nie istnieć */ }
+    }
 
     // Zapisz ostatni sygnał dla Double Confirmation
     latestSignals.set(m.name, { signal, ts: Date.now() });
@@ -123,11 +152,13 @@ async function pollOnce(): Promise<void> {
     if (polyYes !== null && snap.windowSecIn < m.windowMax && signal !== "NONE") {
       const arrow = signal === "BUY_YES" ? "🟢" : "🔴";
       const sign  = (lagPct ?? 0) >= 0 ? "+" : "";
+      const frTag = snap.fundingRate !== null ? ` | FR ${(snap.fundingRate*100).toFixed(4)}%` : "";
+      
       console.log(
         `  ${arrow} LAG ${m.name.split(" ")[0]} ${m.intervalMin}M: ` +
         `spot ${snap.changePct >= 0 ? "+" : ""}${snap.changePct.toFixed(3)}% | ` +
         `poly ${polyYes.toFixed(3)} vs fair ${fairYes.toFixed(3)} | ` +
-        `lag ${sign}${(lagPct ?? 0).toFixed(2)}pp [${signal}] [+${snap.windowSecIn}s]`
+        `lag ${sign}${(lagPct ?? 0).toFixed(2)}pp [${signal}] [+${snap.windowSecIn}s]${frTag}`
       );
     }
   }
@@ -147,6 +178,12 @@ export function getLatestLagSignal(market: string): "BUY_YES" | "BUY_NO" | "NONE
   // Sygnał ważny tylko przez 30s (odświeżany co 5s, więc max 6 próbek)
   if (Date.now() - entry.ts > 30_000) return "NONE";
   return entry.signal;
+}
+
+export function getMicrostructure(symbol: Symbol): { fr: number | null, oi: number | null } {
+    const snap = getSpotSnapshot(symbol, 5);
+    if (!snap) return { fr: null, oi: null };
+    return { fr: snap.fundingRate, oi: snap.openInterest };
 }
 
 // ─── Public ────────────────────────────────────────────────────────────────

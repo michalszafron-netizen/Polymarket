@@ -3,6 +3,7 @@
  *
  * Rynki BTC/ETH Up or Down mają slug z timestampem: btc-updown-5m-1778067600
  * Obliczamy aktualny slot i pobieramy cenę YES z CLOB midpoint.
+ * Od v2: pobieramy też best bid/ask z /book dla obu tokenów (YES i NO).
  */
 
 const GAMMA = "https://gamma-api.polymarket.com";
@@ -75,6 +76,32 @@ async function fetchMidpoint(tokenId: string): Promise<number | null> {
   }
 }
 
+// ─── Pobierz best bid/ask z CLOB (/book endpoint) ─────────────────────────
+
+interface BookSide { bid: number | null; ask: number | null; }
+
+async function fetchBestBidAsk(tokenId: string): Promise<BookSide> {
+  try {
+    const res = await fetch(`${CLOB}/book?token_id=${tokenId}`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return { bid: null, ask: null };
+    const data = await res.json() as {
+      bids?: Array<{ price: string; size: string }>;
+      asks?: Array<{ price: string; size: string }>;
+    };
+    // bids: sorted desc (highest first), asks: sorted asc (lowest first)
+    const bid = data.bids?.length ? parseFloat(data.bids[0].price) : null;
+    const ask = data.asks?.length ? parseFloat(data.asks[0].price) : null;
+    return {
+      bid: bid !== null && !isNaN(bid) ? bid : null,
+      ask: ask !== null && !isNaN(ask) ? ask : null,
+    };
+  } catch {
+    return { bid: null, ask: null };
+  }
+}
+
 // ─── Znajdź aktualny token ID dla rynku ────────────────────────────────────
 
 async function findTokenIds(marketName: string): Promise<[string, string] | null> {
@@ -102,7 +129,12 @@ export interface PolyPrice {
   yes:       number;
   yesToken:  string;
   noToken:   string;
-  source: "polymarket" | "simulated";
+  source:    "polymarket" | "simulated";
+  // Spread data — null jeśli /book był niedostępny
+  yesBid:    number | null;
+  yesAsk:    number | null;
+  noBid:     number | null;
+  noAsk:     number | null;
 }
 
 export async function getPolyPrice(marketName: string): Promise<PolyPrice | null> {
@@ -118,8 +150,25 @@ export async function getPolyPrice(marketName: string): Promise<PolyPrice | null
     if (!fresh) return null;
     mid = await fetchMidpoint(fresh[0]);
     if (mid === null) return null;
-    return { yes: mid, yesToken: fresh[0], noToken: fresh[1], source: "polymarket" };
+    tokens[0] = fresh[0];
+    tokens[1] = fresh[1];
   }
+  if (mid === null) return null;
 
-  return { yes: mid, yesToken: tokens[0], noToken: tokens[1], source: "polymarket" };
+  // Pobierz book dla obu tokenów równolegle (best bid/ask dla spreadu)
+  const [yesBook, noBook] = await Promise.all([
+    fetchBestBidAsk(tokens[0]),
+    fetchBestBidAsk(tokens[1]),
+  ]);
+
+  return {
+    yes:      mid,
+    yesToken: tokens[0],
+    noToken:  tokens[1],
+    source:   "polymarket",
+    yesBid:   yesBook.bid,
+    yesAsk:   yesBook.ask,
+    noBid:    noBook.bid,
+    noAsk:    noBook.ask,
+  };
 }

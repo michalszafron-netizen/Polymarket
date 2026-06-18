@@ -34,6 +34,10 @@ const CONFIG = {
   // Analiza 1467 trades: near-even (0.45-0.55) ma WR=47% vs BE=50% → -6% EV
   // Trades z bet_price<0.45 mają WR=53-57% vs BE=27-41% → ogromny edge
   maxBetPrice: 0.45,
+  // ── Filtry obronne ─────────────────────────────────────────────────────
+  noTradeHoursUtc:  [0, 1, 2, 3, 4, 5, 6], // 00-07 UTC — niska płynność Polymarketu
+  maxOpenPositions: 3,                       // max równoczesnych otwartych pozycji
+  lossCooldownMin:  30,                      // min przerwa po stracie w danym rynku
   markets: [
     { name: "BTC 5-Min Up/Down",  symbol: "BTCUSDT", interval: "5",  horizonMin: 5,  skipHoursUtc: [], active: true  },
     { name: "ETH 5-Min Up/Down",  symbol: "ETHUSDT", interval: "5",  horizonMin: 5,  skipHoursUtc: [], active: true  },
@@ -88,6 +92,20 @@ const markTraded = db.prepare(`
     trade_order_id = ?
   WHERE id = ?
 `);
+
+// ── Zapytania dla filtrów obronnych ───────────────────────────────────────
+
+const qOpenCount = db.prepare<[], { cnt: number }>(
+  `SELECT COUNT(*) as cnt FROM edges WHERE traded = 1 AND resolved = 0`
+);
+
+const qOpenSameMarketDir = db.prepare<[string, string], { id: number }>(
+  `SELECT id FROM edges WHERE traded = 1 AND resolved = 0 AND market = ? AND direction = ? LIMIT 1`
+);
+
+const qLastLoss = db.prepare<[string], { ts: string }>(
+  `SELECT ts FROM edges WHERE traded = 1 AND resolved = 1 AND correct = 0 AND market = ? ORDER BY ts DESC LIMIT 1`
+);
 
 const resolveEdges = db.prepare(`
   UPDATE edges
@@ -348,28 +366,57 @@ async function scanMarket(market: typeof CONFIG.markets[number]): Promise<void> 
 
     // 8. Execute trade — tylko gdy jesteśmy w oknie wejścia i mamy prawdziwą cenę Poly
     if (inWindow && polyPrice && ev > 0) {
-      const signal: EdgeSignal = {
-        market:     market.name,
-        direction:  pred.direction,
-        confidence: calConf,
-        yes_price:  yesPrice,
-        ev,
-        kelly,
-        yesToken:   polyPrice.yesToken,
-        noToken:    polyPrice.noToken,
-      };
-      execute(signal).then(result => {
-        if (result.status === "dry-run" || result.status === "executed") {
-          markTraded.run(
-            result.status === "dry-run" ? 1 : 0,
-            result.sizeUsd,
-            result.orderId ?? null,
-            edgeId
+      const sym = market.symbol.replace("USDT", "");
+      const utcH = new Date().getUTCHours();
+
+      // ── Filtry obronne ────────────────────────────────────────────────────
+      if (CONFIG.noTradeHoursUtc.includes(utcH)) {
+        console.log(`  🌙 [FILTR] nocna cisza ${utcH}:xx UTC — brak handlu`);
+
+      } else if (lagSignal === "NONE" || !signalsAgree) {
+        console.log(`  🔴 [FILTR] brak DC (lag=${lagSignal}, agree=${signalsAgree}) — pomijam ${sym}`);
+
+      } else if ((qOpenCount.get()!.cnt) >= CONFIG.maxOpenPositions) {
+        console.log(`  🔒 [FILTR] max ${CONFIG.maxOpenPositions} otwartych pozycji — pomijam ${sym}`);
+
+      } else if (qOpenSameMarketDir.get(market.name, pred.direction)) {
+        console.log(`  🔁 [FILTR] już otwarta ${pred.direction} na ${market.name} — dedup`);
+
+      } else {
+        const lastLoss = qLastLoss.get(market.name);
+        const minSince = lastLoss
+          ? (Date.now() - new Date(lastLoss.ts.replace(" ", "T") + "Z").getTime()) / 60000
+          : Infinity;
+
+        if (minSince < CONFIG.lossCooldownMin) {
+          console.log(`  ❄️  [FILTR] cooldown ${sym} — ${minSince.toFixed(0)}min po ostatniej stracie (min ${CONFIG.lossCooldownMin})`);
+
+        } else {
+          // Wszystkie filtry przeszły — wykonaj trade
+          const signal: EdgeSignal = {
+            market:     market.name,
+            direction:  pred.direction,
+            confidence: calConf,
+            yes_price:  yesPrice,
+            ev,
+            kelly,
+            yesToken:   polyPrice.yesToken,
+            noToken:    polyPrice.noToken,
+          };
+          execute(signal).then(result => {
+            if (result.status === "dry-run" || result.status === "executed") {
+              markTraded.run(
+                result.status === "dry-run" ? 1 : 0,
+                result.sizeUsd,
+                result.orderId ?? null,
+                edgeId
+              );
+            }
+          }).catch((err: unknown) =>
+            console.error(`  ❌ Trader: ${err instanceof Error ? err.message : String(err)}`)
           );
         }
-      }).catch((err: unknown) =>
-        console.error(`  ❌ Trader: ${err instanceof Error ? err.message : String(err)}`)
-      );
+      }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
