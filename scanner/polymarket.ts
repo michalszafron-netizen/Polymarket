@@ -90,9 +90,12 @@ async function fetchBestBidAsk(tokenId: string): Promise<BookSide> {
       bids?: Array<{ price: string; size: string }>;
       asks?: Array<{ price: string; size: string }>;
     };
-    // bids: sorted desc (highest first), asks: sorted asc (lowest first)
-    const bid = data.bids?.length ? parseFloat(data.bids[0].price) : null;
-    const ask = data.asks?.length ? parseFloat(data.asks[0].price) : null;
+    // Polymarket CLOB returns bids ASC (lowest first) and asks DESC (highest first).
+    // Best bid = last element of bids, best ask = last element of asks.
+    const bids = data.bids ?? [];
+    const asks = data.asks ?? [];
+    const bid = bids.length ? parseFloat(bids[bids.length - 1].price) : null;
+    const ask = asks.length ? parseFloat(asks[asks.length - 1].price) : null;
     return {
       bid: bid !== null && !isNaN(bid) ? bid : null,
       ask: ask !== null && !isNaN(ask) ? ask : null,
